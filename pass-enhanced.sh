@@ -18,8 +18,16 @@ entry=$(printf '%s\n' "${password_files[@]}" | dmenu -i -p "Select entry:")
 # If no entry selected, exit
 [ -z "$entry" ] && exit 0
 
-# Now show options menu
-options=$(cat <<'EOF'
+# Get the line count
+line_count=$(( $(pass show "$entry" | wc -l) ))
+
+if [ "$line_count" -eq 1 ]; then
+    options=$(cat <<'EOF'
+1. Copy password
+EOF
+)
+else
+    options=$(cat <<'EOF'
 1: Normal Autotype + copy TOTP
 2: Modified Autotype + copy TOTP
 3: Copy username
@@ -27,6 +35,7 @@ options=$(cat <<'EOF'
 5: Copy TOTP (if exists)
 EOF
 )
+fi
 
 selected=$(printf '%s\n' "$options" | dmenu -i -p "Action for $entry:")
 
@@ -98,50 +107,55 @@ wait_for_ctrl_v() {
 # Wait a short delay for dmenu to close (e.g., 0.5s)
 sleep 0.5
 
-case "$action" in
-    1)
-        # Autotype: user TAB pass ENTER, then copy TOTP
-        username=$(get_login)
-        password=$(get_password)
-        if [ -n "$username" ] && [ -n "$password" ]; then
+if [ $line_count -gt 1 ]; then
+    case "$action" in
+        1)
+            # Autotype: user TAB pass ENTER, then copy TOTP
+            username=$(get_login)
+            password=$(get_password)
+            if [ -n "$username" ] && [ -n "$password" ]; then
+                xdotool type --delay 10 "$username"
+                xdotool key Tab
+                xdotool type --delay 10 "$password"
+                xdotool key Return
+            fi
+            copy_totp
+            ;;
+        2)
+        # Type username + ENTER
+            username=$(get_login)
+            if [ -n "$username" ]; then
             xdotool type --delay 10 "$username"
-            xdotool key Tab
-            xdotool type --delay 10 "$password"
-            xdotool key Return
-        fi
-        copy_totp
-        ;;
-    2)
-	# Type username + ENTER
-    	username=$(get_login)
-    	if [ -n "$username" ]; then
-	    xdotool type --delay 10 "$username"
-            xdotool key Return
-    	fi
+                xdotool key Return
+            fi
 
-	# Copy password
-	password=$(get_password)
-	echo -n "$password" | xclip -selection clipboard
-
-	wait_for_ctrl_v
-
-	copy_totp
-	
-	;;
-
-    3)
-        # Copy username
-        username=$(get_login)
-        if [ -n "$username" ]; then
-            copy_to_clipboard "$username"
-        fi
-        ;;
-    4)
         # Copy password
-        pass show -c "$entry"
-        ;;
-    5)
-        # Copy TOTP if exists
+        password=$(get_password)
+        echo -n "$password" | xclip -selection clipboard
+
+        wait_for_ctrl_v
+
         copy_totp
+        
         ;;
-esac
+
+        3)
+            # Copy username
+            username=$(get_login)
+            if [ -n "$username" ]; then
+                copy_to_clipboard "$username"
+            fi
+            ;;
+        4)
+            # Copy password
+            pass show -c "$entry"
+            ;;
+        5)
+            # Copy TOTP if exists
+            copy_totp
+            ;;
+    esac
+else
+    # Copy password
+    pass show -c "$entry"
+fi
