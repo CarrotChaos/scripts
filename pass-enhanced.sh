@@ -59,8 +59,16 @@ copy_to_clipboard() {
     (sleep "$duration" && xclip -selection clipboard -i /dev/null) &
 }
 
+# Detect the keyboard ID dynamically
+keyboard_id=$(xinput list --id-only "AT Translated Set 2 keyboard" 2>/dev/null)
+
+# Fail safely if not found
+if [ -z "$keyboard_id" ]; then
+    echo "Keyboard not found!"
+    exit 1
+fi
+
 wait_for_ctrl_v() {
-    local keyboard_id=19   # your physical keyboard
     local ctrl_pressed=0
     local v_pressed=0
 
