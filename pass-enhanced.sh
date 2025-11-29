@@ -3,14 +3,19 @@
 # Script for pass with dmenu, showing options after selection
 
 set -euo pipefail
+shopt -s globstar nullglob
 
 # Directory for password store
 prefix="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
 
-# Find all .gpg files and format as entry names
+# Find all .gpg files
 password_files=("$prefix"/*.gpg "$prefix"/**/*.gpg)
-password_files=("${password_files[@]#$prefix/}")
-password_files=("${password_files[@]%.gpg}")
+
+# Normalize to entry names
+for i in "${!password_files[@]}"; do
+    password_files[$i]="${password_files[$i]#$prefix/}"   # remove prefix
+    password_files[$i]="${password_files[$i]%.gpg}"       # remove .gpg
+done
 
 # Show dmenu for selecting entry
 entry=$(printf '%s\n' "${password_files[@]}" | dmenu -i -p "Select entry:")
@@ -23,7 +28,8 @@ line_count=$(( $(pass show "$entry" | wc -l) ))
 
 if [ "$line_count" -eq 1 ]; then
     options=$(cat <<'EOF'
-1. Copy password
+1: Autotype password
+2: Copy password
 EOF
 )
 else
@@ -65,17 +71,32 @@ copy_to_clipboard() {
     local content="$1"
     local duration="${2:-45}"  # Default to 45s like pass clip
     echo -n "$content" | xclip -selection clipboard
-    (sleep "$duration" && xclip -selection clipboard -i /dev/null) &
+    printf "" | xclip -selection clipboard
 }
 
 # Detect the keyboard ID dynamically
-keyboard_id=$(xinput list --id-only "AT Translated Set 2 keyboard" 2>/dev/null)
+keyboard_id=$(
+    xinput list |
+    awk '
+        /keyboard/i && /id=[0-9]/ {
+            for (i=1; i<=NF; i++)
+                if ($i ~ /id=[0-9]+/) {
+                    gsub("id=", "", $i)
+                    print $i
+                    exit
+                }
+        }'
+)
+
 
 # Fail safely if not found
 if [ -z "$keyboard_id" ]; then
-    echo "Keyboard not found!"
     exit 1
 fi
+
+# Detect keycodes dynamically
+ctrl_code=$(xmodmap -pk | awk '/Control_L/{print $1}')
+v_code=$(xmodmap -pk | awk '/\<v\>/{print $1}')
 
 wait_for_ctrl_v() {
     local ctrl_pressed=0
@@ -83,16 +104,16 @@ wait_for_ctrl_v() {
 
     while read -r line; do
         # Detect Ctrl press/release
-        if echo "$line" | grep -q "key press.*37"; then
+        if echo "$line" | grep -q "key press.*$ctrl_code"; then
             ctrl_pressed=1
-        elif echo "$line" | grep -q "key release.*37"; then
+        elif echo "$line" | grep -q "key release.*$ctrl_code"; then
             ctrl_pressed=0
         fi
 
         # Detect V press/release
-        if echo "$line" | grep -q "key press.*55"; then
+        if echo "$line" | grep -q "key press.*$v_code"; then
             v_pressed=1
-        elif echo "$line" | grep -q "key release.*55"; then
+        elif echo "$line" | grep -q "key release.*$v_code"; then
             v_pressed=0
         fi
 
@@ -103,11 +124,10 @@ wait_for_ctrl_v() {
     done < <(xinput test "$keyboard_id")
 }
 
-
 # Wait a short delay for dmenu to close (e.g., 0.5s)
 sleep 0.5
 
-if [ $line_count -gt 1 ]; then
+if [ "$line_count" -gt 1 ]; then
     case "$action" in
         1)
             # Autotype: user TAB pass ENTER, then copy TOTP
@@ -156,6 +176,15 @@ if [ $line_count -gt 1 ]; then
             ;;
     esac
 else
-    # Copy password
-    pass show -c "$entry"
+    case "$action" in
+        1)
+            password=$(get_password)
+            xdotool type --delay 10 "$password"
+            xdotool key Return
+	    ;;
+	2)
+            # Copy password
+            pass show -c "$entry"
+            ;;
+    esac
 fi
