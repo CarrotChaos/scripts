@@ -11,5 +11,4 @@ used_kb=$(awk '
 
 used_mb=$((used_kb / 1024))
 
-printf "  %s MB\n" "$used_mb"
-
+printf " %s MB\n" "$used_mb"
