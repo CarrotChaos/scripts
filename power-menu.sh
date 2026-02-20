@@ -4,7 +4,7 @@ CHOICE=$(printf "Suspend\nReboot\nPoweroff" | dmenu -i -p "Power Menu:")
 
 case "$CHOICE" in
 Suspend)
-	sleep 1
+	sleep 2
 	loginctl suspend
 	;;
 Reboot)
