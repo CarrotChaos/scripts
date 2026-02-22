@@ -119,10 +119,12 @@ if [ "$line_count" -gt 1 ]; then
 		username=$(get_login)
 		password=$(get_password)
 		if [ -n "$username" ] && [ -n "$password" ]; then
-			xdotool type --delay 10 "$username"
-			xdotool key Tab
-			xdotool type --delay 10 "$password"
-			xdotool key Return
+			{
+				echo "type $username"
+				echo "key TAB"
+				echo "type $password"
+				echo "key ENTER"
+			} | dotool
 		fi
 		copy_totp
 		;;
@@ -130,8 +132,10 @@ if [ "$line_count" -gt 1 ]; then
 		# Type username + ENTER
 		username=$(get_login)
 		if [ -n "$username" ]; then
-			xdotool type --delay 10 "$username"
-			xdotool key Return
+			{
+				echo "type $username"
+				echo "key ENTER"
+			} | dotool
 		fi
 
 		# Copy password
@@ -164,8 +168,10 @@ else
 	case "$action" in
 	1)
 		password=$(get_password)
-		xdotool type --delay 10 "$password"
-		xdotool key Return
+		{
+			echo "type $password"
+			echo "key ENTER"
+		} | dotool
 		;;
 	2)
 		# Copy password
