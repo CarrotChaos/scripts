@@ -1,15 +1,11 @@
 #!/bin/sh
 
 used_kb=$(awk '
-    /Active\(anon\)/   {a=$2}
-    /Inactive\(anon\)/ {i=$2}
-    /SUnreclaim:/      {u=$2}
-    /KernelStack:/     {k=$2}
-    /PageTables:/      {p=$2}
-    END {print a + i + u + k + p}
+    /MemTotal:/     {t=$2}
+    /MemAvailable:/ {a=$2}
+    END {print t - a}
 ' /proc/meminfo)
 
 used_mb=$((used_kb / 1024))
 
-printf "  %s MB\n" "$used_mb"
-
+printf " %s MB\n" "$used_mb"
