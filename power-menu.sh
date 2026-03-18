@@ -5,7 +5,7 @@ CHOICE=$(printf "Suspend\nReboot\nPoweroff\nLock" | dmenu -i -p "Power Menu:")
 case "$CHOICE" in
 Suspend)
 	slock &
-	sleep 2
+	sleep 1
 	loginctl suspend
 	xset dpms force on
 	;;
