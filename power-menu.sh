@@ -1,17 +1,22 @@
 #!/bin/bash
 
-CHOICE=$(printf "Suspend\nReboot\nPoweroff" | dmenu -i -p "Power Menu:")
+CHOICE=$(printf "Suspend\nReboot\nPoweroff\nLock" | dmenu -i -p "Power Menu:")
 
 case "$CHOICE" in
 Suspend)
+	slock &
 	sleep 2
 	loginctl suspend
+	xset dpms force on
 	;;
 Reboot)
 	loginctl reboot
 	;;
 Poweroff)
 	loginctl poweroff
+	;;
+Lock)
+	slock &
 	;;
 *)
 	exit 0
