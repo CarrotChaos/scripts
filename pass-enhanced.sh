@@ -9,7 +9,7 @@ shopt -s globstar nullglob
 prefix="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
 
 # Find all .gpg files
-password_files=("$prefix"/*.gpg "$prefix"/**/*.gpg)
+password_files=("$prefix"/**/*.gpg)
 
 # Normalize to entry names
 for i in "${!password_files[@]}"; do
@@ -18,13 +18,20 @@ for i in "${!password_files[@]}"; do
 done
 
 # Show dmenu for selecting entry
-entry=$(printf '%s\n' "${password_files[@]}" | dmenu -i -p "Select entry:")
+dmenu_lines=25
+
+# Then update the two dmenu calls:
+entry=$(printf '%s\n' "${password_files[@]}" | dmenu -i -l "$dmenu_lines" -p "Select entry:")
 
 # If no entry selected, exit
 [ -z "$entry" ] && exit 0
 
 # Get the line count
-line_count=$(($(pass show "$entry" | wc -l)))
+pass_output=$(pass show "$entry" 2>/dev/null || {
+	echo "Failed to read entry"
+	exit 1
+})
+line_count=$(printf '%s\n' "$pass_output" | wc -l)
 
 if [ "$line_count" -eq 1 ]; then
 	options=$(
@@ -51,17 +58,13 @@ selected=$(printf '%s\n' "$options" | dmenu -i -p "Action for $entry:")
 action=$(echo "$selected" | cut -d: -f1)
 
 # Helper functions
-get_password() {
-	pass show "$entry" | head -n 1
-}
-
+get_password() { printf '%s\n' "$pass_output" | head -n 1; }
 get_login() {
-	pass show "$entry" | tail -n +2 | grep -i '^login:' | head -n1 | cut -d: -f2- | sed 's/^[ \t]*//'
+	printf '%s\n' "$pass_output" | tail -n +2 |
+		grep -Ei '^(login|user|username):' | head -n1 |
+		cut -d: -f2- | sed 's/^[ \t]*//'
 }
-
-has_totp() {
-	pass show "$entry" | grep -q '^otpauth://'
-}
+has_totp() { printf '%s\n' "$pass_output" | grep -q '^otpauth://'; }
 
 copy_totp() {
 	if has_totp; then
@@ -71,9 +74,12 @@ copy_totp() {
 
 copy_to_clipboard() {
 	local content="$1"
-	local duration="${2:-45}" # Default to 45s like pass clip
+	local duration="${2:-45}"
 	echo -n "$content" | xclip -selection clipboard
-	printf "" | xclip -selection clipboard
+	(
+		sleep "$duration"
+		printf "" | xclip -selection clipboard
+	) &
 }
 
 # Detect the keyboard ID dynamically
@@ -87,7 +93,10 @@ wait_for_ctrl_v() {
 	local ctrl_pressed=0
 	local v_pressed=0
 
-	while read -r line; do
+	# Start xinput test in the background with coproc
+	coproc XINPUT { xinput test "$keyboard_id"; }
+
+	while read -r line <&"${XINPUT[0]}"; do
 		# Detect Ctrl press/release
 		if echo "$line" | grep -q "key press.*$ctrl_code"; then
 			ctrl_pressed=1
@@ -102,11 +111,15 @@ wait_for_ctrl_v() {
 			v_pressed=0
 		fi
 
-		# Both pressed simultaneously = Ctrl+V
+		# Both pressed = Ctrl+V detected
 		if [ "$ctrl_pressed" -eq 1 ] && [ "$v_pressed" -eq 1 ]; then
 			break
 		fi
-	done < <(xinput test "$keyboard_id")
+	done
+
+	# Clean up — this kills xinput immediately so no zombie or CPU waste
+	kill "${XINPUT_PID}" 2>/dev/null || true
+	wait "${XINPUT_PID}" 2>/dev/null || true
 }
 
 # Wait a short delay for dmenu to close (e.g., 0.5s)
@@ -138,13 +151,19 @@ if [ "$line_count" -gt 1 ]; then
 			} | dotool
 		fi
 
+		old_clipboard=$(xclip -selection clipboard -o 2>/dev/null || echo "")
+
 		# Copy password
 		password=$(get_password)
 		echo -n "$password" | xclip -selection clipboard
 
 		wait_for_ctrl_v
-
 		copy_totp
+
+		(
+			sleep 45
+			echo -n "$old_clipboard" | xclip -selection clipboard
+		) &
 
 		;;
 
