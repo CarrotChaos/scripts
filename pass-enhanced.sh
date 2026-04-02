@@ -18,10 +18,7 @@ for i in "${!password_files[@]}"; do
 done
 
 # Show dmenu for selecting entry
-dmenu_lines=25
-
-# Then update the two dmenu calls:
-entry=$(printf '%s\n' "${password_files[@]}" | dmenu -i -l "$dmenu_lines" -p "Select entry:")
+entry=$(printf '%s\n' "${password_files[@]}" | dmenu -l 10 -i -p "Select entry:")
 
 # If no entry selected, exit
 [ -z "$entry" ] && exit 0
@@ -52,7 +49,7 @@ EOF
 	)
 fi
 
-selected=$(printf '%s\n' "$options" | dmenu -i -p "Action for $entry:")
+selected=$(printf '%s\n' "$options" | dmenu -l 10 -p "Action for $entry:")
 
 # Extract the number from selected
 action=$(echo "$selected" | cut -d: -f1)
@@ -132,12 +129,10 @@ if [ "$line_count" -gt 1 ]; then
 		username=$(get_login)
 		password=$(get_password)
 		if [ -n "$username" ] && [ -n "$password" ]; then
-			{
-				echo "type $username"
-				echo "key TAB"
-				echo "type $password"
-				echo "key ENTER"
-			} | dotool
+			xdotool type "$username"
+			xdotool key Tab
+			xdotool type "$password"
+			xdotool key Return
 		fi
 		copy_totp
 		;;
@@ -145,10 +140,8 @@ if [ "$line_count" -gt 1 ]; then
 		# Type username + ENTER
 		username=$(get_login)
 		if [ -n "$username" ]; then
-			{
-				echo "type $username"
-				echo "key ENTER"
-			} | dotool
+			xdotool type "$username"
+			xdotool key Return
 		fi
 
 		old_clipboard=$(xclip -selection clipboard -o 2>/dev/null || echo "")
@@ -187,10 +180,8 @@ else
 	case "$action" in
 	1)
 		password=$(get_password)
-		{
-			echo "type $password"
-			echo "key ENTER"
-		} | dotool
+		xdotool type "$password"
+		xdotool key Return
 		;;
 	2)
 		# Copy password
