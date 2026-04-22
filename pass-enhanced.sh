@@ -109,15 +109,15 @@ EOF
 
 			sub_selected=$(printf '%s\n' "$sub_options" | dmenu -l 5 -p "TOTP action:")
 			sub_action=$(echo "$sub_selected" | cut -d: -f1)
-
 			totp_action="$sub_action"
 		fi
 
 		sleep 0.5
 
-		# Save and clear clipboard
-		clipboard=$(xclip -selection clipboard -o 2>/dev/null)
+		# Save clipboard
+		clipboard=$(xclip -selection clipboard -o 2>/dev/null || echo "")
 		printf "%s" "" | xclip -selection clipboard
+		sleep 0.08
 
 		# Autotype: user TAB pass ENTER, then copy TOTP
 		username=$(get_login)
