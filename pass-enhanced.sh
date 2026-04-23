@@ -139,9 +139,6 @@ perform_totp_option() {
 	esac
 }
 
-# Detect the keyboard ID dynamically
-keyboard_id=$(xinput list --id-only "AT Translated Set 2 keyboard")
-
 # Get the line count
 pass_output=$(pass show "$entry" 2>/dev/null || {
 	exit 1
@@ -156,7 +153,7 @@ copy_pwd|Copy password
 EOF
 	)
 else
-	options=$'sequential|Autotype + copy TOTP (sequential fields)\nwait|Autotype + copy TOTP (wait for password field)\ncopy_login|Copy username\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP (if exists)\ntype_url|Type URL (if exists)'
+	options=$'sequential|Autotype + copy TOTP (sequential fields)\nwait|Autotype + copy TOTP (wait for password field)\ncopy_login|Copy username\ncopy_pwd|Copy password\nautotype_pwd|Autotype password\ncopy_totp|Copy TOTP (if exists)\ntype_url|Type URL (if exists)'
 	method=$(get_field "autotype_method")
 
 	if [ "$method" = "wait" ]; then # If the autotype method is wait then put the wait for password option first
