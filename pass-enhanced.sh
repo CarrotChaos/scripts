@@ -233,7 +233,7 @@ adjacent | wait)
 	# Save clipboard
 	old_clipboard=$(xclip -selection clipboard -o 2>/dev/null || echo "")
 
-	sleep 0.02
+	sleep 0.2
 	username=$(get_field "login")
 	password=$(get_field "password")
 
