@@ -10,6 +10,7 @@ prefix="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
 
 # Find all .gpg files
 password_files=("$prefix"/**/*.gpg)
+[ "${#password_files[@]}" -eq 0 ] && exit 1
 
 # Normalize to entry names
 for i in "${!password_files[@]}"; do
@@ -33,22 +34,25 @@ get_field() {
 		awk -F': ' -v opt="$option" '$1 == opt {print $2; found=1; exit} END {if (!found) print ""}'
 }
 
+clipboard_equals() { # Reads the clipboard twice with a short delay and only returns success
+	local expected="$1"
+	local a b
+	a=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+	sleep 0.02
+	b=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+	[ "$a" = "$expected" ] && [ "$b" = "$expected" ]
+}
+
+restore_clipboard() {
+	printf "%s" "$1" | xclip -selection clipboard
+}
+
 has_totp() { printf '%s\n' "$pass_output" | grep -q '^otpauth://'; }
 
 copy_totp() {
 	if has_totp; then
 		pass otp -c "$entry"
 	fi
-}
-
-copy_to_clipboard() {
-	local content="$1"
-	local duration="${2:-45}"
-	echo -n "$content" | xclip -selection clipboard
-	(
-		sleep "$duration"
-		printf "" | xclip -selection clipboard
-	) &
 }
 
 get_url() {
@@ -95,13 +99,14 @@ perform_totp_option() {
 	local forward count totp
 
 	xdotool key alt+t
+	sleep 0.02
 
 	case "$totp_action" in
 	auto | manual)
 		SECONDS=0 # special bash variable; OK not to declare local
 
 		if [ "$totp_action" = "auto" ]; then
-			while [ "$(xclip -o -selection clipboard 2>/dev/null)" = 'F' ]; do
+			while clipboard_equals "F"; do
 				if [ "$SECONDS" -ge 10 ]; then
 					exit 1
 				fi
@@ -112,7 +117,7 @@ perform_totp_option() {
 			forward=true
 			count=0
 
-			while [ "$(xclip -o -selection clipboard 2>/dev/null)" = 'F' ]; do
+			while clipboard_equals "F"; do
 				if [ "$SECONDS" -ge 10 ]; then
 					exit 1
 				fi
@@ -138,6 +143,7 @@ perform_totp_option() {
 				fi
 
 				xdotool key alt+t
+				sleep 0.02
 			done
 		fi
 
@@ -145,14 +151,14 @@ perform_totp_option() {
 		xdotool type "$totp"
 		xdotool key Return
 		sleep 0.1
-		printf "%s" "$old_clipboard" | xclip -selection clipboard
+		restore_clipboard "$old_clipboard"
 		;;
 	copy)
-		printf "%s" "$old_clipboard" | xclip -selection clipboard
+		restore_clipboard "$old_clipboard"
 		copy_totp
 		;;
 	skip)
-		printf "%s" "$old_clipboard" | xclip -selection clipboard
+		restore_clipboard "$old_clipboard"
 		;;
 	esac
 }
@@ -222,49 +228,47 @@ case "$action" in
 adjacent | wait)
 	totp_action="skip"
 	if has_totp; then
-		totp_action=$(get_totp_option)
+		totp_action="$(get_totp_option)"
 	fi
-
-	sleep 0.2
-
 	# Save clipboard
 	old_clipboard=$(xclip -selection clipboard -o 2>/dev/null || echo "")
-	sleep 0.08
-	# Autotype using tab to find password field
+
+	sleep 0.02
 	username=$(get_field "login")
 	password=$(get_field "password")
-	if [ -n "$username" ] && [ -n "$password" ]; then
-		xdotool type "$username"
-		if [ "$action" = "adjacent" ]; then
+
+	xdotool type "$username"
+	if [ "$action" = "adjacent" ]; then
+		# Autotype using tab to find password field
+		xdotool key Tab
+		xdotool key alt+p # alt+p checks if the field is password
+		sleep 0.02
+
+		count=0
+		# Uses the browser extension to check where to tab
+		while clipboard_equals "F" && [ "$count" -lt 20 ]; do
 			xdotool key Tab
-			xdotool key alt+p # alt+p checks if the field is password
-
-			count=0
-			# Uses the browser extension to check where to tab
-			while [ "$(xclip -o -selection clipboard 2>/dev/null)" != "T" ] && [ $count -lt 20 ]; do
-				sleep 0.05
-				xdotool key Tab
-				xdotool key alt+p
-				count=$((count + 1)) # run max 20 times
-			done
-		else # action is wait
-			xdotool key Return
 			xdotool key alt+p
+			sleep 0.05
+			count=$((count + 1)) # run max 20 times
+		done
+	else # action is wait
+		xdotool key Return
+		xdotool key alt+p
+		sleep 0.02
 
-			SECONDS=0
-			while [ "$(xclip -o -selection clipboard 2>/dev/null)" != "T" ]; do
-				if [ "$SECONDS" -ge 10 ]; then
-					exit 1 # <-- stops everything
-				fi
-				xdotool key alt+p # Check if password field
-				sleep 0.2
-			done
-		fi
+		SECONDS=0
+		while clipboard_equals "F"; do
+			if [ "$SECONDS" -ge 10 ]; then
+				exit 1 # <-- stops everything
+			fi
+			xdotool key alt+p # Check if password field
+			sleep 0.2
+		done
 	fi
 	xdotool type "$password"
 	xdotool key Return
-	sleep 0.1
-	xdotool key alt+t # alt+t checks if the field is totp
+	sleep 0.02
 
 	perform_totp_option "$totp_action" "$old_clipboard" # performs the selected totp option
 
@@ -280,7 +284,7 @@ copy_login)
 	# Copy username
 	username=$(get_field "login")
 	if [ -n "$username" ]; then
-		copy_to_clipboard "$username"
+		printf '%s' "$username" | xclip -selection clipboard
 	fi
 	;;
 copy_pwd)
