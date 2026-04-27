@@ -23,11 +23,12 @@ entry=$(printf '%s\n' "${password_files[@]}" | dmenu -l 10 -i -p "Select entry:"
 # If no entry selected, exit
 [ -z "$entry" ] && exit 0
 
-# Helper functions
-get_password() { printf '%s\n' "$pass_output" | head -n 1; }
-
 get_field() {
 	local option=$1
+	if [ "$option" = "password" ]; then
+		printf '%s\n' "$pass_output" | head -n 1
+		return
+	fi
 	printf '%s\n' "$pass_output" | tail -n +2 |
 		awk -F': ' -v opt="$option" '$1 == opt {print $2; found=1; exit} END {if (!found) print ""}'
 }
@@ -181,8 +182,15 @@ autotype_pwd|Autotype password
 copy_pwd|Copy password
 EOF
 	)
+elif [ -z "$(get_field "password")" ]; then
+	options=$(
+		cat <<'EOF'
+autotype_login|Autotype username
+copy_login|Copy username
+EOF
+	)
 else
-	options=$'adjacent|Autotype + copy TOTP (adjacent fields)\nwait|Autotype + copy TOTP (wait for password field)\ncopy_login|Copy username\ncopy_pwd|Copy password\nautotype_pwd|Autotype password\ncopy_totp|Copy TOTP (if exists)\ntype_url|Type URL (if exists)'
+	options=$'adjacent|Autotype + copy TOTP (adjacent fields)\nwait|Autotype + copy TOTP (wait for password field)\nautotype_login|Autotype username\ncopy_login|Copy username\ncopy_pwd|Copy password\nautotype_pwd|Autotype password\ncopy_totp|Copy TOTP (if exists)\ntype_url|Type URL (if exists)'
 	method=$(get_field "autotype_method")
 fi
 
@@ -224,7 +232,7 @@ adjacent | wait)
 	sleep 0.08
 	# Autotype using tab to find password field
 	username=$(get_field "login")
-	password=$(get_password)
+	password=$(get_field "password")
 	if [ -n "$username" ] && [ -n "$password" ]; then
 		xdotool type "$username"
 		if [ "$action" = "adjacent" ]; then
@@ -261,6 +269,12 @@ adjacent | wait)
 	perform_totp_option "$totp_action" "$old_clipboard" # performs the selected totp option
 
 	;;
+autotype_login)
+	sleep 0.2
+	username=$(get_field "login")
+	xdotool type "$username"
+	xdotool key Return
+	;;
 copy_login)
 	sleep 0.2
 	# Copy username
@@ -276,7 +290,7 @@ copy_pwd)
 	;;
 autotype_pwd)
 	sleep 0.2
-	password=$(get_password)
+	password=$(get_field "password")
 	xdotool type "$password"
 	xdotool key Return
 	;;
