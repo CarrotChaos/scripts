@@ -34,13 +34,148 @@ get_field() {
 		awk -F': ' -v opt="$option" '$1 == opt {print $2; found=1; exit} END {if (!found) print ""}'
 }
 
-clipboard_equals() { # Reads the clipboard twice with a short delay and only returns success
-	local expected="$1"
-	local a b
-	a=$(xclip -o -selection clipboard 2>/dev/null || echo "")
-	sleep 0.02
-	b=$(xclip -o -selection clipboard 2>/dev/null || echo "")
-	[ "$a" = "$expected" ] && [ "$b" = "$expected" ]
+do_alt_p() {
+	xdotool key alt+p
+}
+
+do_alt_t() {
+	xdotool key alt+t
+}
+
+do_tab_and_check() {
+	xdotool key Tab
+	sleep 0.05
+	xdotool key alt+p
+}
+
+wait_for_clip() {
+	local timeout="${1:-10}"
+	local interval="${2:-0.05}"
+	local predicate="$3" # function name
+	local action="$4"    # optional
+
+	local start=$SECONDS
+	local clip
+
+	while true; do
+		if [ -n "$action" ]; then
+			"$action"
+		fi
+
+		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+
+		if "$predicate" "$clip"; then
+			return 0
+		fi
+
+		if ((SECONDS - start >= timeout)); then
+			notify-send "Timeout waiting for clipboard condition"
+			return 1
+		fi
+
+		sleep "$interval"
+	done
+}
+
+wait_for_clip_change() {
+	local timeout="${1:-10}"
+	local interval="${2:-0.05}"
+	local action="${3:-""}"
+
+	local start=$SECONDS
+	local clip
+
+	while true; do
+		[ -n "$action" ] && "$action"
+
+		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+		sleep "$interval"
+
+		# accept ANY valid state
+		if [ "$clip" = "T" ] || [ "$clip" = "F" ]; then
+			return 0
+		fi
+
+		if [ $((SECONDS - start)) -ge "$timeout" ]; then
+			notify-send "Timeout waiting for clipboard ready state"
+			return 1
+		fi
+	done
+}
+
+wait_for_true() {
+	printf "" | xclip -selection clipboard
+	local timeout="${1:-10}"
+	local interval="${2:-0.05}"
+	local action="${3:-""}"
+
+	local start=$SECONDS
+	local clip
+
+	while true; do
+		if [ -n "$action" ]; then
+			"$action"
+			wait_for_clip_change "3" "0.05"
+		fi
+
+		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+
+		if [ "$clip" = "T" ]; then
+			return 0
+		fi
+
+		if [ $((SECONDS - start)) -ge "$timeout" ]; then
+			notify-send "Timeout waiting for TRUE"
+			return 1
+		fi
+		sleep "$interval"
+	done
+}
+
+wait_for_true_totp() {
+	printf "" | xclip -selection clipboard
+	local timeout="${1:-10}"
+	local interval="${2:-0.05}"
+
+	local start=$SECONDS
+	local forward count clip
+	forward=true
+	count=0
+
+	while true; do
+		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+		if [ "$clip" = "T" ]; then
+			return 0
+		fi
+
+		if [ $((SECONDS - start)) -ge "$timeout" ]; then
+			notify-send "Timeout waiting for TRUE"
+			return 1
+		fi
+
+		if [ "$forward" = true ]; then
+			xdotool key Tab
+		else
+			xdotool key Shift+Tab
+		fi
+
+		sleep $interval
+		count=$((count + 1))
+
+		if [ "$count" -eq 3 ]; then
+			count=0
+			if [ "$forward" = true ]; then
+				forward=false
+				xdotool key --repeat 3 Shift+Tab
+			else
+				forward=true
+				xdotool key --repeat 3 Tab
+			fi
+		fi
+
+		xdotool key alt+t
+		wait_for_clip_change "3" "0.05"
+	done
 }
 
 restore_clipboard() {
@@ -98,53 +233,17 @@ perform_totp_option() {
 	local old_clipboard="$2"
 	local forward count totp
 
+	printf "" | xclip -selection clipboard
 	xdotool key alt+t
-	sleep 0.02
+	wait_for_clip_change "3" "0.05" "" # wait up to 3 seconds for clipboard to change
 
 	case "$totp_action" in
 	auto | manual)
-		SECONDS=0 # special bash variable; OK not to declare local
 
 		if [ "$totp_action" = "auto" ]; then
-			while clipboard_equals "F"; do
-				if [ "$SECONDS" -ge 10 ]; then
-					exit 1
-				fi
-				xdotool key alt+t
-				sleep 0.2
-			done
+			wait_for_true "10" "0.1" "do_alt_t"
 		else
-			forward=true
-			count=0
-
-			while clipboard_equals "F"; do
-				if [ "$SECONDS" -ge 10 ]; then
-					exit 1
-				fi
-
-				if [ "$forward" = true ]; then
-					xdotool key Tab
-				else
-					xdotool key Shift+Tab
-				fi
-
-				sleep 0.05
-				count=$((count + 1))
-
-				if [ "$count" -eq 3 ]; then
-					count=0
-					if [ "$forward" = true ]; then
-						forward=false
-						xdotool key --repeat 3 Shift+Tab
-					else
-						forward=true
-						xdotool key --repeat 3 Tab
-					fi
-				fi
-
-				xdotool key alt+t
-				sleep 0.02
-			done
+			wait_for_true_totp "10" "0.1"
 		fi
 
 		totp="$(pass otp "$entry" | head -n1)"
@@ -232,6 +331,7 @@ adjacent | wait)
 	fi
 	# Save clipboard
 	old_clipboard=$(xclip -selection clipboard -o 2>/dev/null || echo "")
+	printf "" | xclip -selection clipboard
 
 	sleep 0.2
 	username=$(get_field "login")
@@ -240,31 +340,11 @@ adjacent | wait)
 	xdotool type "$username"
 	if [ "$action" = "adjacent" ]; then
 		# Autotype using tab to find password field
-		xdotool key Tab
-		xdotool key alt+p # alt+p checks if the field is password
-		sleep 0.02
-
-		count=0
-		# Uses the browser extension to check where to tab
-		while clipboard_equals "F" && [ "$count" -lt 20 ]; do
-			xdotool key Tab
-			xdotool key alt+p
-			sleep 0.05
-			count=$((count + 1)) # run max 20 times
-		done
-	else # action is wait
+		wait_for_true "5" "0.05" "do_tab_and_check" # wait up to 5s for alt+p + tab to be T
+	else                                         # action is wait
 		xdotool key Return
-		xdotool key alt+p
-		sleep 0.02
+		wait_for_true "10" "0.05" "do_alt_p" # wait up to 10s for alt+p to be T
 
-		SECONDS=0
-		while clipboard_equals "F"; do
-			if [ "$SECONDS" -ge 10 ]; then
-				exit 1 # <-- stops everything
-			fi
-			xdotool key alt+p # Check if password field
-			sleep 0.2
-		done
 	fi
 	xdotool type "$password"
 	xdotool key Return
