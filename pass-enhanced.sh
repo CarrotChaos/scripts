@@ -34,18 +34,18 @@ get_field() {
 		awk -F': ' -v opt="$option" '$1 == opt {print $2; found=1; exit} END {if (!found) print ""}'
 }
 
-do_alt_p() {
-	xdotool key alt+p
+do_shift_p() {
+	xdotool key ctrl+alt+p
 }
 
-do_alt_t() {
-	xdotool key alt+t
+do_shift_t() {
+	xdotool key ctrl+alt+t
 }
 
 do_tab_and_check() {
 	xdotool key Tab
 	sleep 0.05
-	xdotool key alt+p
+	xdotool key Shift+p
 }
 
 wait_for_clip() {
@@ -70,7 +70,7 @@ wait_for_clip() {
 
 		if ((SECONDS - start >= timeout)); then
 			notify-send "Timeout waiting for clipboard condition"
-			return 1
+			exit 1
 		fi
 
 		sleep "$interval"
@@ -98,37 +98,8 @@ wait_for_clip_change() {
 
 		if [ $((SECONDS - start)) -ge "$timeout" ]; then
 			notify-send "Timeout waiting for clipboard ready state"
-			return 1
+			exit 1
 		fi
-	done
-}
-
-wait_for_true() {
-	printf "" | xclip -selection clipboard
-	local timeout="${1:-10}"
-	local interval="${2:-0.05}"
-	local action="${3:-""}"
-
-	local start=$SECONDS
-	local clip
-
-	while true; do
-		if [ -n "$action" ]; then
-			"$action"
-			wait_for_clip_change "3" "0.05"
-		fi
-
-		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
-
-		if [ "$clip" = "T" ]; then
-			return 0
-		fi
-
-		if [ $((SECONDS - start)) -ge "$timeout" ]; then
-			notify-send "Timeout waiting for TRUE"
-			return 1
-		fi
-		sleep "$interval"
 	done
 }
 
@@ -173,7 +144,55 @@ wait_for_true_totp() {
 			fi
 		fi
 
-		xdotool key alt+t
+		xdotool key shift+t
+		wait_for_clip_change "3" "0.05"
+	done
+}
+
+wait_for_true_pass() {
+	printf "" | xclip -selection clipboard
+	local timeout="${1:-10}"
+	local interval="${2:-0.05}"
+
+	local start=$SECONDS
+	local forward count clip
+	forward=true
+	count=0
+
+	xdotool key Ctrl+alt+p
+
+	while true; do
+		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+		if [ "$clip" = "T" ]; then
+			return 0
+		fi
+
+		if [ $((SECONDS - start)) -ge "$timeout" ]; then
+			notify-send "Timeout waiting for TRUE"
+			exit 1
+		fi
+
+		if [ "$forward" = true ]; then
+			xdotool key Tab
+		else
+			xdotool key Shift+Tab
+		fi
+
+		sleep $interval
+		count=$((count + 1))
+
+		if [ "$count" -eq 3 ]; then
+			count=0
+			if [ "$forward" = true ]; then
+				forward=false
+				xdotool key --repeat 3 Shift+Tab
+			else
+				forward=true
+				xdotool key --repeat 3 Tab
+			fi
+		fi
+
+		xdotool key Ctrl+alt+p
 		wait_for_clip_change "3" "0.05"
 	done
 }
@@ -202,64 +221,13 @@ get_totp_option() {
 	local selected_label action
 
 	totp_method=$(get_field "totp_method")
-	options=$'auto|Type TOTP (auto-focused field)\nmanual|Type TOTP (tab to field manually)\ncopy|Copy TOTP\nskip|Skip TOTP'
-
-	# If the user has a totp method specified in file, then ask if they want to use that
-	yn_options=$(
-		cat <<'EOF'
-Yes
-No
-EOF
-	)
-
-	if [ -n "$totp_method" ]; then
-		selected_label=$(pick_from_dmenu "$yn_options" "Use specified TOTP method? ($totp_method)") || exit 1
-		action="${selected_label,,}" # convert to lowercase
-		[ "$action" = "yes" ] && {
-			printf '%s\n' "$totp_method"
-			return
-		}
-	fi
+	options=$'auto|Autotype TOTP\nskip|Skip TOTP\ncopy|Copy TOTP\n'
 
 	selected_label=$(pick_from_dmenu "$(printf '%s\n' "$options" | cut -d'|' -f2)" "TOTP action:") || exit 1
 
 	# Map label back to action
 	action=$(printf '%s\n' "$options" | grep "|$selected_label$" | cut -d'|' -f1)
 	printf '%s\n' "$action"
-}
-
-perform_totp_option() {
-	local totp_action="$1"
-	local old_clipboard="$2"
-	local forward count totp
-
-	printf "" | xclip -selection clipboard
-	xdotool key alt+t
-	wait_for_clip_change "3" "0.05" "" # wait up to 3 seconds for clipboard to change
-
-	case "$totp_action" in
-	auto | manual)
-
-		if [ "$totp_action" = "auto" ]; then
-			wait_for_true "10" "0.1" "do_alt_t"
-		else
-			wait_for_true_totp "10" "0.1"
-		fi
-
-		totp="$(pass otp "$entry" | head -n1)"
-		xdotool type "$totp"
-		xdotool key Return
-		sleep 0.1
-		restore_clipboard "$old_clipboard"
-		;;
-	copy)
-		restore_clipboard "$old_clipboard"
-		copy_totp
-		;;
-	skip)
-		restore_clipboard "$old_clipboard"
-		;;
-	esac
 }
 
 pick_from_dmenu() {
@@ -295,36 +263,17 @@ copy_login|Copy username
 EOF
 	)
 else
-	options=$'adjacent|Autotype + copy TOTP (adjacent fields)\nwait|Autotype + copy TOTP (wait for password field)\nautotype_login|Autotype username\ncopy_login|Copy username\ncopy_pwd|Copy password\nautotype_pwd|Autotype password\ncopy_totp|Copy TOTP (if exists)\ntype_url|Type URL (if exists)'
-	method=$(get_field "autotype_method")
+	options=$'autotype_both|Autotype Username + Password\nautotype_login|Autotype username\ncopy_login|Copy username\ncopy_pwd|Copy password\nautotype_pwd|Autotype password\ncopy_totp|Copy TOTP (if exists)\ntype_url|Type URL (if exists)'
 fi
 
-# if the autotype method is specified, then ask the user if they want to use the default method
-action=""
-if [ -n "$method" ]; then
-	yn_options=$(
-		cat <<'EOF'
-Yes
-No
-EOF
-	)
-	selected_label=$(pick_from_dmenu "$yn_options" "Use specified autotype method ($method)?") || exit 1
-	action="${selected_label,,}" # convert to lowercase
-	if [ "$action" = "yes" ]; then
-		action=$method
-	fi
-fi
+selected_label=$(pick_from_dmenu "$(printf '%s\n' "$options" | cut -d'|' -f2)" "Action for $entry:") || exit 1
 
-if [ -z "$method" ] || [ "$action" = "no" ]; then
-	selected_label=$(pick_from_dmenu "$(printf '%s\n' "$options" | cut -d'|' -f2)" "Action for $entry:") || exit 1
-
-	# Map label back to action
-	action=$(printf '%s\n' "$options" | grep "|$selected_label$" | cut -d'|' -f1)
-fi
+# Map label back to action
+action=$(printf '%s\n' "$options" | grep "|$selected_label$" | cut -d'|' -f1)
 
 sleep 0.03
 case "$action" in
-adjacent | wait)
+autotype_both)
 	totp_action="skip"
 	if has_totp; then
 		totp_action="$(get_totp_option)"
@@ -338,19 +287,130 @@ adjacent | wait)
 	password=$(get_field "password")
 
 	xdotool type "$username"
-	if [ "$action" = "adjacent" ]; then
-		# Autotype using tab to find password field
-		wait_for_true "5" "0.05" "do_tab_and_check" # wait up to 5s for alt+p + tab to be T
-	else                                         # action is wait
+	xdotool key Ctrl+alt+l # check if the password field is on the page
+
+	clip=$(xclip -o -selection clipboard 2>/dev/null || echo "") # get the clipboard
+
+	if [ "$clip" = "T" ]; then
+		# the password is on the page so then check if the next input is the password
+		xdotool key Tab
+		xdotool key Ctrl+alt+p
+		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "") # get the clipboard
+		if [ "$clip" = "T" ]; then
+			xdotool type "$password"
+			xdotool key Return
+		else
+			# or else the password field is a few elements down
+			count=1
+			while [ "$count" -le 5 ]; do # go 5 more elements down to check if any are password inputs
+				xdotool key Tab
+				xdotool key Ctrl+alt+p
+				clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+
+				if [ "$clip" = "T" ]; then # if we find the password field then just type password and press enter
+					xdotool type "$password"
+					xdotool key Return
+					break
+				fi
+				((count++))
+			done
+			if [ "$count" -eq 6 ]; then
+				# the password field is not on the page, extension possibly failed?
+				notify-send "Password field not found on the page. Exiting"
+				exit 1
+			fi
+
+		fi
+	else
+		# the password input is not on the page, just press enter
 		xdotool key Return
-		wait_for_true "10" "0.05" "do_alt_p" # wait up to 10s for alt+p to be T
+
+		# wait until the password field is on the page
+		xdotool key Ctrl+alt+l
+		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+		SECONDS=0
+		while [ "$clip" != "T" ]; do
+			if [ "$SECONDS" -gt 10 ]; then
+				notify-send "Timed out waiting for password field."
+				exit 1
+			fi
+			xdotool key Ctrl+alt+l
+			clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+		done
+
+		xdotool key Ctrl+alt+p # check if the current input is the password
+		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+		if [ "$clip" = "T" ]; then
+			sleep 0.08
+			xdotool type "$password"
+			xdotool key Return
+		else
+			# the password input is down the page
+			count=1
+			while [ "$count" -le 5 ]; do # go 5 more elements down to check if any are password inputs
+				xdotool key Tab
+				xdotool key Ctrl+alt+p
+				clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+
+				if [ "$clip" = "T" ]; then # if we find the password field then just type password and press enter
+					xdotool type "$password"
+					xdotool key Return
+					break
+				fi
+				((count++))
+			done
+			if [ "$count" -eq 6 ]; then
+				# the password field is not on the page, extension possibly failed?
+				notify-send "Password field not found on the page. Exiting"
+				exit 1
+			fi
+
+		fi
 
 	fi
-	xdotool type "$password"
-	xdotool key Return
-	sleep 0.02
+	sleep 0.4
+	if [ "$totp_action" = "auto" ]; then
+		xdotool key Ctrl+alt+g
+		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+		SECONDS=0
+		while [ "$clip" != "T" ]; do
+			if [ "$SECONDS" -ge 10 ]; then
+				notify-send "Timed out waiting for TOTP field"
+				exit 1
+			fi
+			xdotool key Ctrl+alt+g
+			clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+		done
 
-	perform_totp_option "$totp_action" "$old_clipboard" # performs the selected totp option
+		totp="$(pass otp "$entry" | head -n1)"
+		# check if the current field is the totp input
+		xdotool key Ctrl+alt+t
+		clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+		if [ "$clip" = "T" ]; then
+			xdotool type "$totp"
+			xdotool key Return
+		else
+			# the totp is down the page
+			count=1
+			while [ "$count" -le 5 ]; do # go 5 more elements down to check if any are totp inputs
+				xdotool key Tab
+				xdotool key Ctrl+alt+t
+				clip=$(xclip -o -selection clipboard 2>/dev/null || echo "")
+
+				if [ "$clip" = "T" ]; then
+					xdotool type "$totp"
+					xdotool key Return
+					break
+				fi
+				((count++))
+			done
+			if [ "$count" -eq 6 ]; then
+				# the password field is not on the page, extension possibly failed?
+				notify-send "TOTP field not found on the page. Exiting"
+				exit 1
+			fi
+		fi
+	fi
 
 	;;
 autotype_login)
