@@ -140,6 +140,21 @@ else:
 PY
 }
 
+require_browser() {
+	local result
+
+	result=$(native_query "page has password")
+
+	case "$result" in
+	true | false)
+		return 0
+		;;
+	esac
+
+	notify-send "Pass" "Firefox integration unavailable: $result"
+	exit 1
+}
+
 # Get the line count
 if ! pass_output=$(pass show "$entry" 2>/dev/null); then
 	exit 1
@@ -173,6 +188,7 @@ action=$(printf '%s\n' "$options" | grep "|$selected_label$" | cut -d'|' -f1)
 
 case "$action" in
 autotype_both)
+	require_browser
 	totp_action="skip"
 	if has_totp; then
 		totp_action="$(get_totp_option)"

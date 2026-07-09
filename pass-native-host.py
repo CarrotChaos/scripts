@@ -8,14 +8,14 @@ import threading
 
 SOCKET_PATH = "/tmp/pass-dmenu.sock"
 daemon_socket = None
-
+DEBUG = "/tmp/pass-native-debug.log"
 
 # clear old log
 open(DEBUG, "w").close()
 
 
 def log(msg):
-    with open("/tmp/pass-native-debug.log", "a") as f:
+    with open(DEBUG, "a") as f:
         f.write(msg + "\n")
 
 
