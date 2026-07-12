@@ -5,17 +5,17 @@
 set -euo pipefail
 shopt -s globstar nullglob
 
-# Directory for password store
-prefix="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
+# Directory for password files
+prefix="$HOME/passwords"
 
-# Find all .gpg files
-password_files=("$prefix"/**/*.gpg)
+# Find all .txt files
+password_files=("$prefix"/**/*.txt)
 [ "${#password_files[@]}" -eq 0 ] && exit 1
 
 # Normalize to entry names
 for i in "${!password_files[@]}"; do
-	password_files[$i]="${password_files[$i]#$prefix/}" # remove prefix
-	password_files[$i]="${password_files[$i]%.gpg}"     # remove .gpg
+	password_files[$i]="${password_files[$i]#$prefix/}"
+	password_files[$i]="${password_files[$i]%.txt}"
 done
 
 # Show dmenu for selecting entry
@@ -23,22 +23,34 @@ entry=$(printf '%s\n' "${password_files[@]}" | dmenu -l 10 -i -p "Select entry:"
 
 # If no entry selected, exit
 [ -z "$entry" ] && exit 0
+entry_file="$prefix/$entry.txt"
 
-get_field() {
-	local option=$1
-	if [ "$option" = "password" ]; then
-		printf '%s\n' "$pass_output" | head -n 1
-		return
-	fi
-	printf '%s\n' "$pass_output" | tail -n +2 |
-		awk -F': ' -v opt="$option" '$1 == opt {print $2; found=1; exit} END {if (!found) print ""}'
+get_password() {
+	printf '%s\n' "$pass_output" | sed -n '1p'
 }
 
-has_totp() { printf '%s\n' "$pass_output" | grep -q '^otpauth://'; }
+get_username() {
+	printf '%s\n' "$pass_output" | sed -n '2p'
+}
+
+has_totp() {
+	printf '%s\n' "$pass_output" | grep -q '^otp: '
+}
+
+get_totp_secret() {
+	printf '%s\n' "$pass_output" |
+		sed -nE 's/^otp:[[:space:]]*//p' |
+		head -n1
+}
 
 copy_totp() {
 	if has_totp; then
-		pass otp -c "$entry"
+		secret=$(get_totp_secret)
+
+		if [ -n "$secret" ]; then
+			totp=$(printf '%s\n' "$secret" | python3 "$HOME/scripts/mintotp.py" | head -n1)
+			printf '%s' "$totp" | xclip -selection clipboard
+		fi
 	fi
 }
 
@@ -156,11 +168,13 @@ require_browser() {
 }
 
 # Get the line count
-if ! pass_output=$(pass show "$entry" 2>/dev/null); then
+entry_file="$prefix/$entry.txt"
+
+if ! pass_output=$(cat "$entry_file" 2>/dev/null); then
 	exit 1
 fi
 
-line_count=$(printf '%s\n' "$pass_output" | wc -l)
+line_count=$(printf '%s' "$pass_output" | wc -l)
 
 if [ "$line_count" -eq 1 ]; then
 	options=$(
@@ -169,7 +183,7 @@ autotype_pwd|Autotype password
 copy_pwd|Copy password
 EOF
 	)
-elif [ -z "$(get_field "password")" ]; then
+elif [ -z "$(get_password)" ]; then
 	options=$(
 		cat <<'EOF'
 autotype_login|Autotype username
@@ -177,7 +191,7 @@ copy_login|Copy username
 EOF
 	)
 else
-	options=$'autotype_both|Autotype username + password\ncopy_login|Copy username\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP (if exists)\nautotype_login|Autotype username\nautotype_pwd|Autotype password\ntype_url|Type URL (if exists)'
+	options=$'autotype_both|Autotype username + password\ncopy_login|Copy username\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP (if exists)\nadd_totp|Insert TOTP\nautotype_login|Autotype username\nautotype_pwd|Autotype password\ncopy_url|Copy URL (if exists)'
 
 fi
 
@@ -194,8 +208,8 @@ autotype_both)
 		totp_action="$(get_totp_option)"
 	fi
 
-	username=$(get_field "login")
-	password=$(get_field "password")
+	username=$(get_username)
+	password=$(get_password)
 
 	xdotool type "$username"
 	psswd_on_page=$(native_query "page has password")
@@ -224,7 +238,8 @@ autotype_both)
 		native_query "wait totp"
 		notify-send "Found TOTP"
 		is_totp=$(native_query "is totp")
-		totp="$(pass otp "$entry" | head -n1)"
+		secret=$(get_totp_secret)
+		totp=$(printf '%s\n' "$secret" | python3 "$HOME/scripts/mintotp.py" | head -n1)
 		if [ "$is_totp" = "true" ]; then
 			xdotool type "$totp"
 			xdotool key Return
@@ -239,42 +254,53 @@ autotype_both)
 
 	;;
 copy_login)
-	sleep 0.05
 	# Copy username
-	username=$(get_field "login")
+	username=$(get_username)
 	if [ -n "$username" ]; then
 		printf '%s' "$username" | xclip -selection clipboard
 	fi
 	;;
 copy_pwd)
-	sleep 0.05
 	# Copy password
-	pass show -c "$entry"
+	password=$(get_password)
+	printf '%s' "$password" | xclip -selection clipboard
 	;;
 copy_totp)
-	sleep 0.05
 	# Copy TOTP if exists
 	copy_totp
 	;;
+add_totp)
+	secret=$(xclip -o -selection clipboard 2>/dev/null | tr -d '\n\r ')
+	[ -z "$secret" ] && exit 0
+
+	if grep -q '^otp:' "$entry_file"; then
+		choice=$(printf "Replace existing TOTP\nCancel" | dmenu -p "TOTP already exists:")
+
+		[ "$choice" != "Replace existing TOTP" ] && exit 0
+
+		sed -i "s/^otp:.*/otp: $secret/" "$entry_file"
+	else
+		printf '\notp: %s\n' "$secret" >>"$entry_file"
+	fi
+
+	notify-send "Passwords" "TOTP added to $entry"
+	;;
 autotype_login)
-	sleep 0.2
-	username=$(get_field "login")
+	username=$(get_username)
 	xdotool type "$username"
 	xdotool key Return
 	;;
 autotype_pwd)
-	sleep 0.05
-	password=$(get_field "password")
+	password=$(get_password)
 	xdotool type "$password"
 	xdotool key Return
 	;;
-type_url)
-	sleep 0.05
+copy_url)
 	# Type url
 	url=$(get_url)
 	if [ -n "$url" ]; then
-		xdotool type "$url"
-		xdotool key Return
+		printf '%s' "$url" | xclip -selection clipboard
 	fi
+
 	;;
 esac
