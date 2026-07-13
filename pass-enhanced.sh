@@ -174,8 +174,7 @@ if ! pass_output=$(cat "$entry_file" 2>/dev/null); then
 	exit 1
 fi
 
-line_count=$(printf '%s' "$pass_output" | wc -l)
-
+line_count=$(printf '%s\n' "$pass_output" | wc -l)
 if [ "$line_count" -eq 1 ]; then
 	options=$(
 		cat <<'EOF'
@@ -191,7 +190,7 @@ copy_login|Copy username
 EOF
 	)
 else
-	options=$'autotype_both|Autotype username + password\ncopy_login|Copy username\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP (if exists)\nadd_totp|Insert TOTP\nautotype_login|Autotype username\nautotype_pwd|Autotype password\ncopy_url|Copy URL (if exists)'
+	options=$'autotype_both|Autotype username + password\ncopy_login|Copy username\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP (if exists)\nadd_totp|Insert TOTP\ncopy_url|Copy URL (if exists)'
 
 fi
 
