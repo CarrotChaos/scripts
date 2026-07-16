@@ -8,6 +8,24 @@ shopt -s globstar nullglob
 # Directory for password files
 prefix="$HOME/passwords"
 
+# Ensure password container is mounted
+if ! mountpoint -q "$prefix"; then
+	notify-send "Passwords" "Password storage is not mounted. Opening..."
+
+	if ! "$HOME/scripts/open-passwords-dmenu.sh"; then
+		notify-send "Passwords" "Failed to open password storage"
+		exit 1
+	fi
+
+	# Give mount a moment to appear
+	sleep 1
+
+	if ! mountpoint -q "$prefix"; then
+		notify-send "Passwords" "Password storage is still not mounted"
+		exit 1
+	fi
+fi
+
 # Find all .txt files
 password_files=("$prefix"/**/*.txt)
 [ "${#password_files[@]}" -eq 0 ] && exit 1
@@ -39,7 +57,7 @@ has_totp() {
 
 get_totp_secret() {
 	printf '%s\n' "$pass_output" |
-		sed -nE 's/^otp:[[:space:]]*//p' |
+		sed -nE 's/^totp:[[:space:]]*//p' |
 		head -n1
 }
 

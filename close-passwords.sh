@@ -1,4 +1,4 @@
 #!/bin/sh
 
-doas umount ~/passwords
-doas cryptsetup close passwords
+doas /usr/bin/umount ~/passwords
+doas /usr/bin/cryptsetup close passwords
