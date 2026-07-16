@@ -13,7 +13,6 @@ if ! mountpoint -q "$prefix"; then
 	notify-send "Passwords" "Password storage is not mounted. Opening..."
 
 	if ! "$HOME/scripts/open-passwords-dmenu.sh"; then
-		notify-send "Passwords" "Failed to open password storage"
 		exit 1
 	fi
 
