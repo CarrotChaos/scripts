@@ -1,149 +1,142 @@
 #!/usr/bin/env bash
 
-# Script for pass with dmenu, showing options after selection
-
 set -euo pipefail
-shopt -s globstar nullglob
 
-# Directory for password files
-prefix="$HOME/passwords"
+VAULT="/dev/shm/passwords.yaml"
+QUERY="$HOME/scripts/vault_query.py"
+EDIT="$HOME/scripts/vault_edit.py"
 
-# Ensure password container is mounted
-if ! mountpoint -q "$prefix"; then
-	notify-send "Passwords" "Password storage is not mounted. Opening..."
+if [ ! -f "$VAULT" ]; then
+	notify-send "Passwords" "Vault not found. Opening..."
 
-	if ! "$HOME/scripts/open-passwords-dmenu.sh"; then
+	if ! "$HOME/scripts/decrypt.sh"; then
 		exit 1
 	fi
 
-	# Give mount a moment to appear
-	sleep 1
-
-	if ! mountpoint -q "$prefix"; then
-		notify-send "Passwords" "Password storage is still not mounted"
+	if [ ! -f "$VAULT" ]; then
+		notify-send "Passwords" "Vault is still unavailable"
 		exit 1
 	fi
 fi
 
-# Find all .txt files
-password_files=("$prefix"/**/*.txt)
-[ "${#password_files[@]}" -eq 0 ] && exit 1
+# Select entry
+selection=$(
+	python "$QUERY" list |
+		dmenu -l 10 -i -p "Select entry:"
+)
 
-# Normalize to entry names
-for i in "${!password_files[@]}"; do
-	password_files[$i]="${password_files[$i]#$prefix/}"
-	password_files[$i]="${password_files[$i]%.txt}"
-done
+[ -z "$selection" ] && exit 0
 
-# Show dmenu for selecting entry
-entry=$(printf '%s\n' "${password_files[@]}" | dmenu -l 10 -i -p "Select entry:")
+entry_name="$selection"
 
-# If no entry selected, exit
-[ -z "$entry" ] && exit 0
-entry_file="$prefix/$entry.txt"
+entry_id=$(python "$QUERY" id "$selection")
+
+get_field() {
+	python "$QUERY" get "$entry_id" "$1"
+}
+
+username=$(get_field username)
+password=$(get_field password)
+url=$(get_field url)
+totp_secret=$(get_field totp)
 
 get_password() {
-	printf '%s\n' "$pass_output" | sed -n '1p'
+	printf '%s' "$password"
 }
 
 get_username() {
-	printf '%s\n' "$pass_output" | sed -n '2p'
-}
-
-has_totp() {
-	printf '%s\n' "$pass_output" | grep -q '^otp: '
-}
-
-get_totp_secret() {
-	printf '%s\n' "$pass_output" |
-		sed -nE 's/^totp:[[:space:]]*//p' |
-		head -n1
-}
-
-copy_totp() {
-	if has_totp; then
-		secret=$(get_totp_secret)
-
-		if [ -n "$secret" ]; then
-			totp=$(printf '%s\n' "$secret" | python3 "$HOME/scripts/mintotp.py" | head -n1)
-			printf '%s' "$totp" | xclip -selection clipboard
-		fi
-	fi
+	printf '%s' "$username"
 }
 
 get_url() {
-	printf '%s\n' "$pass_output" |
-		sed -nE 's/^[[:space:]]*url:[[:space:]]*//p' |
-		head -n1
+	printf '%s' "$url"
 }
 
-get_totp_option() {
-	local totp_method
-	local selected_label action
+get_totp_secret() {
+	printf '%s' "$totp_secret"
+}
 
-	options=$'auto|Autotype TOTP\ncopy|Copy TOTP\nskip|Skip TOTP'
+has_totp() {
+	[ -n "$totp_secret" ]
+}
 
-	selected_label=$(pick_from_dmenu "$(printf '%s\n' "$options" | cut -d'|' -f2)" "TOTP action:") || exit 1
+copy_totp() {
 
-	# Map label back to action
-	action=$(printf '%s\n' "$options" | grep "|$selected_label$" | cut -d'|' -f1)
-	printf '%s\n' "$action"
+	if has_totp; then
+
+		totp=$(printf '%s\n' "$totp_secret" |
+			python "$HOME/scripts/mintotp.py" |
+			head -n1)
+
+		printf '%s' "$totp" |
+			xclip -selection clipboard
+	fi
 }
 
 pick_from_dmenu() {
+
 	local input="$1"
 	local prompt="$2"
-	local selection
 
 	[ -z "$input" ] && return 1
-	[ -z "$prompt" ] && return 1
-	selection=$(printf '%s\n' "$input" | dmenu -l 10 -p "$prompt") || return 1
-	printf '%s\n' "$selection"
+
+	printf '%s\n' "$input" |
+		dmenu -l 10 -p "$prompt"
+}
+
+get_totp_option() {
+
+	options=$'auto|Autotype TOTP\ncopy|Copy TOTP\nskip|Skip TOTP'
+
+	selected=$(
+		pick_from_dmenu \
+			"$(printf '%s\n' "$options" | cut -d'|' -f2)" \
+			"TOTP action:"
+	)
+
+	printf '%s\n' "$options" |
+		grep "|$selected$" |
+		cut -d'|' -f1
 }
 
 DAEMON_SOCKET="/tmp/pass-dmenu.sock"
 
 native_query() {
+
 	local value="$1"
 
-	python3 - "$value" "$DAEMON_SOCKET" <<'PY'
+	python - "$value" "$DAEMON_SOCKET" <<'PY'
 import sys
 import json
 import socket
 
-value = sys.argv[1]
-sock_path = sys.argv[2]
+value=sys.argv[1]
+sock_path=sys.argv[2]
 
-sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
 
 try:
     sock.connect(sock_path)
-
-except Exception as e:
+except:
     print("daemon_error")
-    sys.exit(0)
-
-
-request = {
-    "value": value
-}
+    sys.exit()
 
 
 sock.sendall(
-    (json.dumps(request) + "\n").encode()
+    (json.dumps({"value":value})+"\n").encode()
 )
 
 
-data = b""
+data=b""
 
 while True:
 
-    chunk = sock.recv(4096)
+    chunk=sock.recv(4096)
 
     if not chunk:
         break
 
-    data += chunk
+    data+=chunk
 
     if b"\n" in data:
         break
@@ -152,14 +145,9 @@ while True:
 sock.close()
 
 
-if not data:
-    print("no_response")
-    sys.exit(0)
-
-
-line = data.split(b"\n")[0]
-
-reply = json.loads(line.decode())
+reply=json.loads(
+    data.split(b"\n")[0].decode()
+)
 
 
 if "error" in reply:
@@ -167,59 +155,57 @@ if "error" in reply:
 else:
     print(reply.get("value",""))
 PY
+
 }
 
 require_browser() {
-	local result
 
 	result=$(native_query "page has password")
 
 	case "$result" in
-	true | false)
-		return 0
-		;;
-	esac
 
-	notify-send "Pass" "Firefox integration unavailable: $result"
-	exit 1
+	true | false)
+		return
+		;;
+
+	*)
+		notify-send "Pass" "Firefox integration unavailable: $result"
+		exit 1
+		;;
+
+	esac
 }
 
-# Get the line count
-entry_file="$prefix/$entry.txt"
-
-if ! pass_output=$(cat "$entry_file" 2>/dev/null); then
+if [ -n "$username" ] && [ -n "$password" ]; then
+	options=$'autotype_both|Autotype username + password\ncopy_login|Copy username\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP\nadd_totp|Add TOTP\ncopy_url|Copy URL'
+elif [ -n "$password" ]; then
+	options=$'autotype_pwd|Autotype password\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP'
+elif [ -n "$username" ]; then
+	options=$'autotype_login|Autotype username\ncopy_login|Copy username'
+else
 	exit 1
 fi
 
-line_count=$(printf '%s\n' "$pass_output" | wc -l)
-if [ "$line_count" -eq 1 ]; then
-	options=$(
-		cat <<'EOF'
-autotype_pwd|Autotype password
-copy_pwd|Copy password
-EOF
-	)
-elif [ -z "$(get_password)" ]; then
-	options=$(
-		cat <<'EOF'
-autotype_login|Autotype username
-copy_login|Copy username
-EOF
-	)
-else
-	options=$'autotype_both|Autotype username + password\ncopy_login|Copy username\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP (if exists)\nadd_totp|Insert TOTP\ncopy_url|Copy URL (if exists)'
+selected_label=$(
+	printf '%s\n' "$options" |
+		cut -d'|' -f2 |
+		dmenu -l 10 -p "Action for $entry_name:"
+)
 
-fi
-
-selected_label=$(pick_from_dmenu "$(printf '%s\n' "$options" | cut -d'|' -f2)" "Action for $entry:") || exit 1
-
-# Map label back to action
-action=$(printf '%s\n' "$options" | grep "|$selected_label$" | cut -d'|' -f1)
+action=$(
+	printf '%s\n' "$options" |
+		grep "|$selected_label$" |
+		cut -d'|' -f1
+)
 
 case "$action" in
+
 autotype_both)
+
 	require_browser
+
 	totp_action="skip"
+
 	if has_totp; then
 		totp_action="$(get_totp_option)"
 	fi
@@ -227,96 +213,132 @@ autotype_both)
 	username=$(get_username)
 	password=$(get_password)
 
+	notify-send "Passwords" "Typing username"
 	xdotool type "$username"
+
 	psswd_on_page=$(native_query "page has password")
+
 	if [ "$psswd_on_page" = "true" ]; then
-		notify-send "The password input is on the page"
-		# just go to the next input and type
+
+		notify-send "Passwords" "Password field already on page"
+
 		native_query "tab"
+
+		notify-send "Passwords" "Typing password"
+
 		xdotool type "$password"
 		xdotool key Return
+
 	else
-		notify-send "The password input isn't on the page"
+
+		notify-send "Passwords" "Waiting for password page"
+
 		xdotool key Return
+
 		password_ready=$(native_query "wait password")
 
 		if [ "$password_ready" = "true" ]; then
-			notify-send "Found password input!"
+
+			notify-send "Passwords" "Password field found"
+
 			xdotool type "$password"
 			xdotool key Return
+
 		else
-			notify-send "Password field never appeared"
+
+			notify-send "Passwords" "Password field never appeared"
+
 		fi
+
 	fi
 
 	if [ "$totp_action" = "auto" ]; then
-		notify-send "Waiting for TOTP"
+
+		notify-send "Passwords" "Waiting for TOTP field"
+
 		native_query "wait totp"
-		notify-send "Found TOTP"
-		is_totp=$(native_query "is totp")
+
+		notify-send "Passwords" "Generating TOTP"
+
 		secret=$(get_totp_secret)
-		totp=$(printf '%s\n' "$secret" | python3 "$HOME/scripts/mintotp.py" | head -n1)
+
+		totp=$(printf '%s\n' "$secret" |
+			python "$HOME/scripts/mintotp.py" |
+			head -n1)
+
+		is_totp=$(native_query "is totp")
+
 		if [ "$is_totp" = "true" ]; then
+
+			notify-send "Passwords" "Typing TOTP"
+
 			xdotool type "$totp"
 			xdotool key Return
+
 		else
+
+			notify-send "Passwords" "Tabbing to TOTP field"
+
 			native_query "tab"
+
 			xdotool type "$totp"
 			xdotool key Return
+
 		fi
+
 	elif [ "$totp_action" = "copy" ]; then
+
+		notify-send "Passwords" "Copying TOTP"
+
 		copy_totp
+
 	fi
 
 	;;
+
 copy_login)
-	# Copy username
-	username=$(get_username)
-	if [ -n "$username" ]; then
-		printf '%s' "$username" | xclip -selection clipboard
-	fi
+
+	printf '%s' "$username" |
+		xclip -selection clipboard
+
 	;;
+
 copy_pwd)
-	# Copy password
-	password=$(get_password)
-	printf '%s' "$password" | xclip -selection clipboard
-	;;
-copy_totp)
-	# Copy TOTP if exists
-	copy_totp
+
+	printf '%s' "$password" |
+		xclip -selection clipboard
+
 	;;
 add_totp)
+
 	secret=$(xclip -o -selection clipboard 2>/dev/null | tr -d '\n\r ')
+
 	[ -z "$secret" ] && exit 0
 
-	if grep -q '^otp:' "$entry_file"; then
-		choice=$(printf "Replace existing TOTP\nCancel" | dmenu -p "TOTP already exists:")
+	python "$EDIT" set-totp "$entry_id" "$secret"
 
-		[ "$choice" != "Replace existing TOTP" ] && exit 0
+	notify-send "Passwords" "TOTP updated for $entry_name"
 
-		sed -i "s/^otp:.*/otp: $secret/" "$entry_file"
-	else
-		printf '\notp: %s\n' "$secret" >>"$entry_file"
-	fi
-
-	notify-send "Passwords" "TOTP added to $entry"
 	;;
+
+copy_totp)
+
+	copy_totp
+
+	;;
+
+copy_url)
+
+	printf '%s' "$url" |
+		xclip -selection clipboard
+
+	;;
+
 autotype_login)
-	username=$(get_username)
+
 	xdotool type "$username"
 	xdotool key Return
-	;;
-autotype_pwd)
-	password=$(get_password)
-	xdotool type "$password"
-	xdotool key Return
-	;;
-copy_url)
-	# Type url
-	url=$(get_url)
-	if [ -n "$url" ]; then
-		printf '%s' "$url" | xclip -selection clipboard
-	fi
 
 	;;
+
 esac
