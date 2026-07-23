@@ -179,9 +179,9 @@ require_browser() {
 if [ -n "$username" ] && [ -n "$password" ]; then
 	options=$'autotype_both|Autotype username + password\ncopy_login|Copy username\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP\nadd_totp|Add TOTP\ncopy_url|Copy URL'
 elif [ -n "$password" ]; then
-	options=$'autotype_pwd|Autotype password\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP'
+	options=$'copy_pwd|Copy password'
 elif [ -n "$username" ]; then
-	options=$'autotype_login|Autotype username\ncopy_login|Copy username'
+	options=$'copy_login|Copy username'
 else
 	exit 1
 fi
