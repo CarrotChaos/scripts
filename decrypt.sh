@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INPUT="$HOME/passwords.yaml.gpg"
-OUTPUT="/dev/shm/passwords.yaml"
+INPUT="$HOME/passwords.json.gpg"
+OUTPUT="/dev/shm/passwords.json"
 
 if [ ! -f "$INPUT" ]; then
 	echo "Error: $INPUT not found."

@@ -2,9 +2,8 @@
 
 set -euo pipefail
 
-VAULT="/dev/shm/passwords.yaml"
+VAULT="/dev/shm/passwords.json"
 QUERY="$HOME/scripts/vault_query.py"
-EDIT="$HOME/scripts/vault_edit.py"
 
 if [ ! -f "$VAULT" ]; then
 	notify-send "Passwords" "Vault not found. Opening..."
@@ -176,14 +175,26 @@ require_browser() {
 	esac
 }
 
+options=""
+
 if [ -n "$username" ] && [ -n "$password" ]; then
-	options=$'autotype_both|Autotype username + password\ncopy_login|Copy username\ncopy_pwd|Copy password\ncopy_totp|Copy TOTP\nadd_totp|Add TOTP\ncopy_url|Copy URL'
+	options=$'autotype_both|Autotype username + password\ncopy_login|Copy username\ncopy_pwd|Copy password'
 elif [ -n "$password" ]; then
 	options=$'copy_pwd|Copy password'
 elif [ -n "$username" ]; then
 	options=$'copy_login|Copy username'
 else
 	exit 1
+fi
+
+if has_totp; then
+	options+=$'\ncopy_totp|Copy TOTP'
+fi
+
+options+=$'\nadd_totp|Add TOTP'
+
+if [ -n "$url" ]; then
+	options+=$'\ncopy_url|Copy URL'
 fi
 
 selected_label=$(
@@ -209,9 +220,6 @@ autotype_both)
 	if has_totp; then
 		totp_action="$(get_totp_option)"
 	fi
-
-	username=$(get_username)
-	password=$(get_password)
 
 	notify-send "Passwords" "Typing username"
 	xdotool type "$username"
@@ -287,58 +295,37 @@ autotype_both)
 		fi
 
 	elif [ "$totp_action" = "copy" ]; then
-
 		notify-send "Passwords" "Copying TOTP"
 
 		copy_totp
 
 	fi
-
 	;;
-
 copy_login)
-
 	printf '%s' "$username" |
 		xclip -selection clipboard
-
 	;;
-
 copy_pwd)
-
 	printf '%s' "$password" |
 		xclip -selection clipboard
 
 	;;
 add_totp)
-
 	secret=$(xclip -o -selection clipboard 2>/dev/null | tr -d '\n\r ')
-
 	[ -z "$secret" ] && exit 0
-
-	python "$EDIT" set-totp "$entry_id" "$secret"
-
+	python "$HOME/scripts/totp_edit.py" "$entry_id" "$secret"
 	notify-send "Passwords" "TOTP updated for $entry_name"
-
 	;;
-
 copy_totp)
-
 	copy_totp
-
 	;;
-
 copy_url)
-
+	[ -z "$url" ] && exit 0
 	printf '%s' "$url" |
 		xclip -selection clipboard
-
 	;;
-
 autotype_login)
-
 	xdotool type "$username"
 	xdotool key Return
-
 	;;
-
 esac

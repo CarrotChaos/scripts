@@ -3,8 +3,8 @@ set -euo pipefail
 
 KEYID="user@gentoo.org"
 
-INPUT="/dev/shm/passwords.yaml"
-OUTPUT="$HOME/passwords.yaml.gpg"
+INPUT="/dev/shm/passwords.json"
+OUTPUT="$HOME/passwords.json.gpg"
 
 if [ ! -f "$INPUT" ]; then
 	echo "Error: $INPUT not found."
