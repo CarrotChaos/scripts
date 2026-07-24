@@ -4,9 +4,10 @@ SCRIPT_DIR="$HOME/scripts"
 
 choice=$(
 	printf '%s\n' \
+		"Type/Copy Entry Password" \
 		"Add Entry" \
+		"Add/Edit TOTP" \
 		"Edit Password" \
-		"Edit TOTP" \
 		"Delete Entry" \
 		"Encrypt Vault" \
 		"Decrypt Vault" |
@@ -14,6 +15,9 @@ choice=$(
 )
 
 case "$choice" in
+"Type/Copy Entry Password")
+	$SCRIPT_DIR/pass-type.sh
+	;;
 "Add Entry")
 	st -e python3 "$SCRIPT_DIR/add_entry.py"
 	;;
@@ -40,7 +44,7 @@ case "$choice" in
 
 	notify-send "Passwords" "Entry deleted."
 	;;
-"Edit Password" | "Edit TOTP")
+"Edit Password" | "Add/Edit TOTP")
 
 	selection=$(
 		python3 "$SCRIPT_DIR/vault_query.py" list |
