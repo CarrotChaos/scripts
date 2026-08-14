@@ -1,11 +1,26 @@
 #!/usr/bin/env bash
 
 SCRIPT_DIR="$HOME/scripts"
+VAULT="/dev/shm/passwords.json"
+
+if [ ! -f "$VAULT" ]; then
+	notify-send "Passwords" "Vault not found. Opening..."
+
+	if ! "$HOME/scripts/decrypt.sh"; then
+		exit 1
+	fi
+
+	if [ ! -f "$VAULT" ]; then
+		notify-send "Passwords" "Vault is still unavailable"
+		exit 1
+	fi
+fi
 
 choice=$(
 	printf '%s\n' \
 		"Type/Copy Entry Password" \
 		"Add Entry" \
+		"Edit Entry" \
 		"Add/Edit TOTP" \
 		"Edit Password" \
 		"Delete Entry" \
@@ -20,6 +35,22 @@ case "$choice" in
 	;;
 "Add Entry")
 	st -e python3 "$SCRIPT_DIR/add_entry.py"
+	;;
+"Edit Entry")
+	selection=$(
+		python3 "$SCRIPT_DIR/vault_query.py" list |
+			dmenu -i -l 10 -p "Select entry:"
+	)
+
+	[ -z "$selection" ] && exit 0
+
+	entry_id=$(
+		python3 "$SCRIPT_DIR/vault_query.py" id "$selection"
+	)
+
+	st -e python3 "$SCRIPT_DIR/edit_entry.py" "$entry_id"
+
+	notify-send "Passwords" "Entry updated"
 	;;
 "Delete Entry")
 	selection=$(

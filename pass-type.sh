@@ -2,21 +2,7 @@
 
 set -euo pipefail
 
-VAULT="/dev/shm/passwords.json"
 QUERY="$HOME/scripts/vault_query.py"
-
-if [ ! -f "$VAULT" ]; then
-	notify-send "Passwords" "Vault not found. Opening..."
-
-	if ! "$HOME/scripts/decrypt.sh"; then
-		exit 1
-	fi
-
-	if [ ! -f "$VAULT" ]; then
-		notify-send "Passwords" "Vault is still unavailable"
-		exit 1
-	fi
-fi
 
 # Select entry
 selection=$(
