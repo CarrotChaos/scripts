@@ -1,16 +1,14 @@
 #!/bin/sh
 
 WALLPAPER="$(realpath "$1")"
+THEME="$2"
 
-~/theme-gen/theme-gen "$WALLPAPER"
+printf '%s\n' "$WALLPAPER" > ~/.cache/wallpaper
 
-mkdir -p ~/.cache/theme
-printf '%s\n' "$WALLPAPER" >~/.cache/theme/wallpaper
+python ~/scripts/wallpaper_colors.py "$WALLPAPER" --theme "$THEME"
 
 xwallpaper --zoom "$WALLPAPER"
-
 xrdb -merge ~/.cache/theme-gen/colors.Xresources
-
 dunstctl reload
 xdotool key super+F5
 pkill -USR1 -x st
