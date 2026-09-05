@@ -32,9 +32,9 @@ THEMES = {
         "background_sel": "#313244",
         "border": "#585B70",
 
-        # DWM family colors.
+        # DWM semantic/family colors.
         #
-        # These are intentionally separate from the ST ANSI palette.
+        # These are intentionally DIFFERENT from the ST ANSI palette.
         "dwm_colors": {
             "red": ("Maroon", "#EBA0AC"),
             "green": ("Green", "#A6E3A1"),
@@ -44,7 +44,30 @@ THEMES = {
             "cyan": ("Teal", "#94E2D5"),
         },
 
-        # Exact Catppuccin Mocha ST / DWM bar ANSI palette.
+        # DWM status-bar ANSI palette.
+        #
+        # Red and blue use the DWM-specific Maroon/Sky colors.
+        "dwm_bar": [
+            "#45475A",  # 0  black
+            "#EBA0AC",  # 1  red / maroon
+            "#A6E3A1",  # 2  green
+            "#F9E2AF",  # 3  yellow
+            "#89DCEB",  # 4  blue / sky
+            "#F5C2E7",  # 5  magenta
+            "#94E2D5",  # 6  cyan
+            "#BAC2DE",  # 7  white
+
+            "#585B70",  # 8  bright black
+            "#EBA0AC",  # 9  bright red / maroon
+            "#A6E3A1",  # 10 bright green
+            "#F9E2AF",  # 11 bright yellow
+            "#89DCEB",  # 12 bright blue / sky
+            "#F5C2E7",  # 13 bright magenta
+            "#94E2D5",  # 14 bright cyan
+            "#A6ADC8",  # 15 bright white
+        ],
+
+        # Exact original Catppuccin Mocha ST palette.
         "terminal": [
             "#45475A",
             "#F38BA8",
@@ -80,7 +103,7 @@ THEMES = {
         "background_sel": "#3C3836",
         "border": "#928374",
 
-        # Bright Gruvbox colors for DWM family matching.
+        # DWM semantic/family colors.
         "dwm_colors": {
             "red": ("Bright Red", "#FB4934"),
             "green": ("Bright Green", "#B8BB26"),
@@ -90,7 +113,28 @@ THEMES = {
             "cyan": ("Bright Aqua", "#8EC07C"),
         },
 
-        # Exact dark Gruvbox ST / DWM bar ANSI palette.
+        # DWM status-bar ANSI palette.
+        "dwm_bar": [
+            "#282828",
+            "#FB4934",
+            "#B8BB26",
+            "#FABD2F",
+            "#83A598",
+            "#D3869B",
+            "#8EC07C",
+            "#A89984",
+
+            "#928374",
+            "#FB4934",
+            "#B8BB26",
+            "#FABD2F",
+            "#83A598",
+            "#D3869B",
+            "#8EC07C",
+            "#EBDBB2",
+        ],
+
+        # Exact dark Gruvbox ST palette.
         "terminal": [
             "#282828",
             "#CC241D",
@@ -120,7 +164,6 @@ THEMES = {
 
 
 def hex_to_rgb(hex_color):
-    """Convert #RRGGBB to RGB values in the 0.0-1.0 range."""
     hex_color = hex_color.lstrip("#")
 
     if len(hex_color) != 6:
@@ -140,12 +183,6 @@ def srgb_to_linear(value):
 
 
 def rgb_to_oklab(hex_color):
-    """
-    Convert an sRGB hex color to OKLab.
-
-    Returns:
-        (L, a, b)
-    """
     r, g, b = hex_to_rgb(hex_color)
 
     r = srgb_to_linear(r)
@@ -188,7 +225,6 @@ def rgb_to_oklab(hex_color):
 
 
 def color_distance(color_a, color_b):
-    """Return Euclidean distance between two colors in OKLab."""
     a = rgb_to_oklab(color_a)
     b = rgb_to_oklab(color_b)
 
@@ -200,18 +236,12 @@ def color_distance(color_a, color_b):
 
 
 def get_saturation(rgb):
-    """Return HSV saturation for an RGB tuple."""
     r, g, b = rgb
     _, saturation, _ = colorsys.rgb_to_hsv(r, g, b)
     return saturation
 
 
 def should_ignore(rgb):
-    """
-    Ignore black, white, and low-saturation pixels.
-
-    These thresholds intentionally remain unchanged.
-    """
     r, g, b = rgb
 
     brightness = (r + g + b) / 3.0
@@ -230,11 +260,6 @@ def should_ignore(rgb):
 
 
 def classify_family(rgb):
-    """
-    Classify an RGB color into a broad hue family.
-
-    These hue thresholds intentionally remain unchanged.
-    """
     r, g, b = rgb
     hue, _, _ = colorsys.rgb_to_hsv(r, g, b)
     hue *= 360.0
@@ -268,13 +293,6 @@ def rgb_tuple_to_hex(rgb):
 
 
 def analyze_wallpaper(path):
-    """
-    Analyze the wallpaper using the occurrence-based method.
-
-    Black, white, gray, and low-saturation pixels are ignored.
-    The dominant family is the family with the highest occurrence.
-    """
-
     try:
         image = Image.open(path)
     except FileNotFoundError:
@@ -297,14 +315,10 @@ def analyze_wallpaper(path):
 
     family_counts = Counter()
     family_rgb_totals = {}
-
     colored_pixels = []
 
     for pixel in pixels:
-        rgb = tuple(
-            channel / 255.0
-            for channel in pixel
-        )
+        rgb = tuple(channel / 255.0 for channel in pixel)
 
         if should_ignore(rgb):
             continue
@@ -335,22 +349,18 @@ def analyze_wallpaper(path):
         for family, count in family_counts.items()
     }
 
-    dominant_family, dominant_count = (
-        family_counts.most_common(1)[0]
-    )
+    dominant_family, dominant_count = family_counts.most_common(1)[0]
 
-    dominant_rgb_total = family_rgb_totals[dominant_family]
+    dominant_rgb = family_rgb_totals[dominant_family]
 
     dominant_average = tuple(
         value / dominant_count
-        for value in dominant_rgb_total
+        for value in dominant_rgb
     )
 
     average_rgb = tuple(
-        sum(
-            pixel[channel]
-            for pixel in colored_pixels
-        ) / len(colored_pixels)
+        sum(pixel[channel] for pixel in colored_pixels)
+        / len(colored_pixels)
         for channel in range(3)
     )
 
@@ -364,15 +374,13 @@ def analyze_wallpaper(path):
             for value in rgb_total
         )
 
-        family_average_colors[family] = (
-            rgb_tuple_to_hex(average)
+        family_average_colors[family] = rgb_tuple_to_hex(
+            average
         )
 
     return {
         "average_color": rgb_tuple_to_hex(average_rgb),
-        "dominant_color": rgb_tuple_to_hex(
-            dominant_average
-        ),
+        "dominant_color": rgb_tuple_to_hex(dominant_average),
         "dominant_family": dominant_family,
         "dominant_percentage": (
             dominant_count / total_colored
@@ -383,12 +391,6 @@ def analyze_wallpaper(path):
 
 
 def find_dwm_color(theme, family, wallpaper_color):
-    """
-    Select the DWM color for the dominant wallpaper family.
-
-    The DWM family color is explicitly defined by the theme.
-    OKLab distance is calculated for reporting.
-    """
     name, hex_color = theme["dwm_colors"][family]
 
     distance = color_distance(
@@ -404,13 +406,12 @@ def find_dwm_color(theme, family, wallpaper_color):
 
 
 def generate_xresources(theme, dwm_color):
-    """Generate Xresources for DWM, dmenu, slock, and ST."""
-
     os.makedirs(
         os.path.dirname(XRESOURCES_PATH),
         exist_ok=True,
     )
 
+    dwm_bar = theme["dwm_bar"]
     terminal = theme["terminal"]
 
     lines = [
@@ -433,28 +434,17 @@ def generate_xresources(theme, dwm_color):
         "",
         "! ============================================================",
         "! dwm status bar ANSI colors",
-        "! These intentionally use the exact ST terminal palette.",
+        "! DWM-specific palette.",
         "! ============================================================",
         "",
     ]
 
-    for index, color in enumerate(terminal):
+    for index, color in enumerate(dwm_bar):
         lines.append(
             f"dwm.barcolor{index}: {color}"
         )
 
     lines.extend([
-        "",
-        "! ============================================================",
-        "! dmenu",
-        "! ============================================================",
-        "",
-        f"dmenu.foreground: {theme['foreground']}",
-        f"dmenu.background: {theme['background']}",
-        f"dmenu.foregroundSel: {theme['background']}",
-        f"dmenu.backgroundSel: {dwm_color['color']}",
-        f"dmenu.foregroundOut: {theme['foreground']}",
-        f"dmenu.backgroundOut: {theme['background']}",
         "",
         "! ============================================================",
         "! slock",
@@ -481,10 +471,8 @@ def generate_xresources(theme, dwm_color):
         f"st.foreground: {theme['terminal_foreground']}",
         f"st.background: {theme['terminal_background']}",
         f"st.cursorColor: {theme['terminal_cursor']}",
-        (
-            "st.cursorColorReverse: "
-            f"{theme['terminal_cursor_reverse']}"
-        ),
+        f"st.cursorColorReverse: "
+        f"{theme['terminal_cursor_reverse']}",
         "",
     ])
 
@@ -497,8 +485,6 @@ def generate_xresources(theme, dwm_color):
 
 
 def generate_dunst(theme, dwm_color):
-    """Generate ~/.config/dunst/dunstrc."""
-
     os.makedirs(
         os.path.dirname(DUNST_PATH),
         exist_ok=True,
@@ -538,20 +524,6 @@ frame_color = "{critical_frame}"
         file.write(content)
 
 
-def print_usage():
-    print(
-        "Usage:\n"
-        "  python wallpaper_colors.py WALLPAPER --theme THEME\n\n"
-        "Themes:\n"
-        "  catppuccin\n"
-        "  gruvbox\n\n"
-        "Example:\n"
-        "  python wallpaper_colors.py "
-        "~/Pictures/Wallpapers/5120x2880.png "
-        "--theme catppuccin"
-    )
-
-
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -574,10 +546,7 @@ def main():
 
     args = parser.parse_args()
 
-    wallpaper = os.path.expanduser(
-        args.wallpaper
-    )
-
+    wallpaper = os.path.expanduser(args.wallpaper)
     theme_name = args.theme.lower()
 
     if not os.path.isfile(wallpaper):
@@ -590,9 +559,7 @@ def main():
     theme = THEMES[theme_name]
 
     try:
-        analysis = analyze_wallpaper(
-            wallpaper
-        )
+        analysis = analyze_wallpaper(wallpaper)
     except Exception as exc:
         print(
             f"Error: {exc}",
@@ -631,43 +598,22 @@ def main():
     print("Wallpaper Theme Generator")
     print("=" * 60)
     print()
-
+    print(f"Theme:           {theme['display_name']}")
+    print(f"Wallpaper:       {wallpaper}")
+    print(f"Dominant family: {dominant_family}")
     print(
-        f"Theme:              "
-        f"{theme['display_name']}"
-    )
-
-    print(
-        f"Wallpaper:          "
-        f"{wallpaper}"
-    )
-
-    print(
-        f"Dominant family:    "
-        f"{dominant_family}"
-    )
-
-    print(
-        f"Occurrence:         "
+        f"Occurrence:      "
         f"{analysis['dominant_percentage']:.2f}%"
     )
-
+    print(f"Wallpaper color: {dominant_color}")
     print(
-        f"Wallpaper color:    "
-        f"{dominant_color}"
+        f"DWM color:       "
+        f"{dwm_color['name']} {dwm_color['color']}"
     )
-
     print(
-        f"DWM theme color:    "
-        f"{dwm_color['name']} "
-        f"{dwm_color['color']}"
-    )
-
-    print(
-        f"OKLab distance:     "
+        f"OKLab distance:  "
         f"{dwm_color['distance']:.4f}"
     )
-
     print()
     print("Family breakdown:")
 
@@ -676,9 +622,7 @@ def main():
         key=lambda item: item[1],
         reverse=True,
     ):
-        average = (
-            analysis["family_average_colors"][family]
-        )
+        average = analysis["family_average_colors"][family]
 
         print(
             f"  {family:<8} "
@@ -688,99 +632,34 @@ def main():
 
     print()
     print("Generated:")
-    print(
-        f"  Xresources: "
-        f"{XRESOURCES_PATH}"
-    )
-    print(
-        f"  Dunst:      "
-        f"{DUNST_PATH}"
-    )
-
+    print(f"  Xresources: {XRESOURCES_PATH}")
+    print(f"  Dunst:      {DUNST_PATH}")
     print()
-    print("DWM colors:")
-    print(
-        f"  background:    "
-        f"{theme['background']}"
-    )
-    print(
-        f"  foreground:    "
-        f"{theme['foreground']}"
-    )
-    print(
-        f"  border:        "
-        f"{theme['border']}"
-    )
-    print(
-        f"  backgroundSel: "
-        f"{dwm_color['color']}"
-    )
-    print(
-        f"  foregroundSel: "
-        f"{theme['background']}"
-    )
-    print(
-        f"  borderSel:     "
-        f"{dwm_color['color']}"
-    )
-
+    print("DWM:")
+    print(f"  background:    {theme['background']}")
+    print(f"  foreground:    {theme['foreground']}")
+    print(f"  border:        {theme['border']}")
+    print(f"  backgroundSel: {dwm_color['color']}")
+    print(f"  foregroundSel: {theme['background']}")
+    print(f"  borderSel:     {dwm_color['color']}")
     print()
-    print("Dmenu colors:")
-    print(
-        f"  background:    "
-        f"{theme['background']}"
-    )
-    print(
-        f"  foreground:    "
-        f"{theme['foreground']}"
-    )
-    print(
-        f"  backgroundSel: "
-        f"{dwm_color['color']}"
-    )
-    print(
-        f"  foregroundSel: "
-        f"{theme['background']}"
-    )
-    print(
-        f"  backgroundOut: "
-        f"{theme['background']}"
-    )
-    print(
-        f"  foregroundOut: "
-        f"{theme['foreground']}"
-    )
-
+    print("DWM bar:")
+    print(f"  red:  {theme['dwm_bar'][1]}")
+    print(f"  blue: {theme['dwm_bar'][4]}")
     print()
-    print("Slock colors:")
+    print("Slock:")
+    print(f"  color0: {theme['background']}")
+    print(f"  color4: {dwm_color['color']}")
     print(
-        f"  color0: "
-        f"{theme['background']}"
+        f"  color1: {theme['dwm_colors']['red'][1]}"
     )
     print(
-        f"  color4: "
-        f"{dwm_color['color']}"
+        f"  color3: {theme['dwm_colors']['yellow'][1]}"
     )
-    print(
-        f"  color1: "
-        f"{theme['dwm_colors']['red'][1]}"
-    )
-    print(
-        f"  color3: "
-        f"{theme['dwm_colors']['yellow'][1]}"
-    )
-
     print()
-    print("Dunst:")
-    print(
-        f"  normal frame:   "
-        f"{dwm_color['color']}"
-    )
-    print(
-        f"  critical frame: "
-        f"{theme['dwm_colors']['red'][1]}"
-    )
-
+    print("ST:")
+    print(f"  red:  {theme['terminal'][1]}")
+    print(f"  blue: {theme['terminal'][4]}")
     print()
     print("=" * 60)
 
