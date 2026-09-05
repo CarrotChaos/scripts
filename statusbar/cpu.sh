@@ -15,4 +15,4 @@ diff_total=$((total - prev_total))
 diff_idle=$((idle2 - prev_idle))
 usage=$(((100 * (diff_total - diff_idle)) / diff_total))
 
-printf "󰍛 %d%%\n" "$usage"
+printf '\033[1;4;32m󰍛 %d%%\033[0m\n' "$usage"

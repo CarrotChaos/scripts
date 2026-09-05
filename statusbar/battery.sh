@@ -35,4 +35,4 @@ else
 	icon="󰂎" # low
 fi
 
-printf "%s %s%%\n" "$icon" "$percent"
+printf '\033[1;4;33m%s %s%%\033[0m\n' "$icon" "$percent"

@@ -45,74 +45,75 @@ fi
 # ------------------------------------------------------------
 # Parse the pass entry
 #
-# With a username:
-#
-# username
-# password
-# totp: ...
-# notes: ...
-# url: ...
-#
-# Without a username:
+# New format:
 #
 # password
-# totp: ...
-# notes: ...
-# url: ...
+# Username: username
+# Totp: ...
+# Notes: ...
+# URL: ...
+#
+# Or without a username:
+#
+# password
+# Totp: ...
+# Notes: ...
+# URL: ...
+#
+# The password is ALWAYS the first line.
+# Username is explicitly identified by "Username:".
+#
+# Notes may be multiline. Once Notes: is encountered, we stay
+# inside the notes section and do not interpret its contents as
+# other fields.
 # ------------------------------------------------------------
 
 username=""
-password=""
+password="${entry_lines[0]}"
 totp_secret=""
 url=""
 notes=""
 
-metadata_prefix() {
-	case "$1" in
-		totp:*|notes:*|url:*)
-			return 0
-			;;
-		*)
-			return 1
-			;;
-	esac
-}
+metadata_start=1
+in_notes=false
 
-password="${entry_lines[0]}"
-
-# If line 2 exists and isn't metadata, it is the password
-# and line 1 is the username.
-if [ "${#entry_lines[@]}" -ge 2 ] &&
-	! metadata_prefix "${entry_lines[1]}"; then
-
-	username="${entry_lines[0]}"
-	password="${entry_lines[1]}"
-	metadata_start=2
-else
-	metadata_start=1
-fi
-
-# Parse optional metadata.
-for ((i = metadata_start; i < ${#entry_lines[@]}; i++)); do
+for ((i = 1; i < ${#entry_lines[@]}; i++)); do
 	line="${entry_lines[i]}"
 
+	# Once Notes: starts, everything following it belongs to notes.
+	# This prevents multiline notes from being interpreted as
+	# usernames or other metadata.
+	if [ "$in_notes" = true ]; then
+		if [ -n "$notes" ]; then
+			notes+=$'\n'
+		fi
+
+		notes+="$line"
+		continue
+	fi
+
 	case "$line" in
-		totp:*)
-			totp_secret="${line#totp: }"
+		Username:*|username:*)
+			username="${line#*:}"
+			username="${username# }"
 			;;
 
-		url:*)
-			url="${line#url: }"
+		Totp:*|totp:*)
+			totp_secret="${line#*:}"
+			totp_secret="${totp_secret# }"
 			;;
 
-		notes:*)
-			note="${line#notes: }"
+		URL:*|url:*)
+			url="${line#*:}"
+			url="${url# }"
+			;;
 
-			if [ -n "$notes" ]; then
-				notes+=$'\n'
-			fi
+		Notes:*|notes:*)
+			note="${line#*:}"
+			note="${note# }"
 
-			notes+="$note"
+			notes="$note"
+			in_notes=true
 			;;
 	esac
 done
@@ -171,15 +172,15 @@ add_totp() {
 		return 1
 	fi
 
-	# Remove an existing TOTP line, then append the new one.
+	# Remove an existing TOTP line, preserving multiline notes.
 	new_contents=$(
 		printf '%s\n' "$entry_contents" |
-			sed '/^totp:/d'
+			sed '/^[Tt]otp:/d'
 	)
 
 	new_contents="${new_contents%$'\n'}"
 	new_contents+=$'\n'
-	new_contents+="totp: $secret"
+	new_contents+="Totp: $secret"
 	new_contents+=$'\n'
 
 	printf '%s' "$new_contents" |
@@ -209,7 +210,7 @@ sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 
 try:
     sock.connect(sock_path)
-except Exception as e:
+except Exception:
     print("daemon_error")
     sys.exit()
 
