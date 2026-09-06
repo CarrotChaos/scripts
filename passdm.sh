@@ -34,7 +34,6 @@ entry_contents=$(pass show "$entry_name") || {
 	exit 1
 }
 
-# Split into lines.
 mapfile -t entry_lines <<< "$entry_contents"
 
 if [ "${#entry_lines[@]}" -eq 0 ]; then
@@ -43,29 +42,13 @@ if [ "${#entry_lines[@]}" -eq 0 ]; then
 fi
 
 # ------------------------------------------------------------
-# Parse the pass entry
+# Parse pass entry
 #
-# New format:
-#
-# password
+# First line = password
 # Username: username
-# Totp: ...
+# Totp: secret
 # Notes: ...
 # URL: ...
-#
-# Or without a username:
-#
-# password
-# Totp: ...
-# Notes: ...
-# URL: ...
-#
-# The password is ALWAYS the first line.
-# Username is explicitly identified by "Username:".
-#
-# Notes may be multiline. Once Notes: is encountered, we stay
-# inside the notes section and do not interpret its contents as
-# other fields.
 # ------------------------------------------------------------
 
 username=""
@@ -74,15 +57,11 @@ totp_secret=""
 url=""
 notes=""
 
-metadata_start=1
 in_notes=false
 
 for ((i = 1; i < ${#entry_lines[@]}; i++)); do
 	line="${entry_lines[i]}"
 
-	# Once Notes: starts, everything following it belongs to notes.
-	# This prevents multiline notes from being interpreted as
-	# usernames or other metadata.
 	if [ "$in_notes" = true ]; then
 		if [ -n "$notes" ]; then
 			notes+=$'\n'
@@ -139,22 +118,157 @@ has_totp() {
 }
 
 # ------------------------------------------------------------
+# Copy password
+#
+# CLIPBOARD -> Ctrl+V
+# PRIMARY   -> middle-click
+# ------------------------------------------------------------
+
+copy_password() {
+	printf '%s' "$password" |
+		xclip -selection clipboard
+
+	printf '%s' "$password" |
+		xclip -selection primary
+
+	notify-send "Passwords" "Password copied"
+}
+
+# ------------------------------------------------------------
 # TOTP
+#
+# Copy to both X11 selections so that either Ctrl+V or
+# middle-click can use the newly generated TOTP.
 # ------------------------------------------------------------
 
 copy_totp() {
 	if has_totp; then
+		local totp
+
 		totp=$(
 			printf '%s\n' "$totp_secret" |
 				python3 "$MINTOTP" |
 				head -n1
 		)
 
+		if [ -z "$totp" ]; then
+			notify-send "Passwords" "Could not generate TOTP"
+			return 1
+		fi
+
+		# Ctrl+V
 		printf '%s' "$totp" |
 			xclip -selection clipboard
 
+		# Middle-click
+		printf '%s' "$totp" |
+			xclip -selection primary
+
 		notify-send "Passwords" "TOTP copied"
 	fi
+}
+
+# ------------------------------------------------------------
+# Wait for Ctrl+V or middle click
+#
+# Ctrl = keycode 37
+# V    = keycode 55
+# Middle mouse = button 2
+#
+# xinput only observes the events. It does not consume them.
+# ------------------------------------------------------------
+
+wait_for_input_trigger() {
+	local detected
+
+	notify-send "Passwords" "Waiting for password paste"
+
+	set +e
+
+	detected=$(
+		stdbuf -oL xinput test-xi2 --root 2>/dev/null |
+		awk '
+		/RawKeyPress/ {
+			event = "press"
+		}
+
+		/RawKeyRelease/ {
+			event = "release"
+		}
+
+		/RawButtonPress/ {
+			event = "button"
+		}
+
+		/^[[:space:]]*detail:/ {
+			code = $2
+
+			# Ctrl pressed
+			if (event == "press" && code == 37)
+				ctrl = 1
+
+			# Ctrl released
+			if (event == "release" && code == 37)
+				ctrl = 0
+
+			# Ctrl+V
+			if (event == "press" && code == 55 && ctrl) {
+				print "CTRLV"
+				fflush()
+				exit
+			}
+
+			# Middle mouse button
+			if (event == "button" && code == 2) {
+				print "MIDDLE"
+				fflush()
+				exit
+			}
+
+			event = ""
+		}
+		'
+	)
+
+	set -e
+
+	case "$detected" in
+		CTRLV|MIDDLE)
+			return 0
+			;;
+	esac
+
+	return 1
+}
+
+# ------------------------------------------------------------
+# TOTP action menu
+# ------------------------------------------------------------
+
+get_totp_option() {
+	local selected
+
+	selected=$(
+		printf '%s\n' \
+			"Copy TOTP after password paste" \
+			"Copy TOTP now" \
+			"Skip TOTP" |
+			dmenu -i -l 3 -p "TOTP action:"
+	)
+
+	case "$selected" in
+		"Copy TOTP after password paste")
+			printf '%s' "wait"
+			;;
+
+		"Copy TOTP now")
+			printf '%s' "copy"
+			;;
+
+		*)
+			printf '%s' "skip"
+			;;
+	esac
 }
 
 # ------------------------------------------------------------
@@ -162,6 +276,9 @@ copy_totp() {
 # ------------------------------------------------------------
 
 add_totp() {
+	local secret
+	local new_contents
+
 	secret=$(
 		xclip -o -selection clipboard 2>/dev/null |
 			tr -d '\n\r '
@@ -172,7 +289,6 @@ add_totp() {
 		return 1
 	fi
 
-	# Remove an existing TOTP line, preserving multiline notes.
 	new_contents=$(
 		printf '%s\n' "$entry_contents" |
 			sed '/^[Tt]otp:/d'
@@ -190,113 +306,13 @@ add_totp() {
 }
 
 # ------------------------------------------------------------
-# Browser integration
-# ------------------------------------------------------------
-
-DAEMON_SOCKET="/tmp/pass-dmenu.sock"
-
-native_query() {
-	local value="$1"
-
-	python3 - "$value" "$DAEMON_SOCKET" <<'PY'
-import sys
-import json
-import socket
-
-value = sys.argv[1]
-sock_path = sys.argv[2]
-
-sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-
-try:
-    sock.connect(sock_path)
-except Exception:
-    print("daemon_error")
-    sys.exit()
-
-sock.sendall(
-    (json.dumps({"value": value}) + "\n").encode()
-)
-
-data = b""
-
-while True:
-    chunk = sock.recv(4096)
-
-    if not chunk:
-        break
-
-    data += chunk
-
-    if b"\n" in data:
-        break
-
-sock.close()
-
-reply = json.loads(
-    data.split(b"\n")[0].decode()
-)
-
-if "error" in reply:
-    print(reply["error"])
-else:
-    print(reply.get("value", ""))
-PY
-}
-
-require_browser() {
-	result=$(native_query "page has password")
-
-	case "$result" in
-		true | false)
-			return
-			;;
-
-		*)
-			notify-send "Pass" "Firefox integration unavailable: $result"
-			exit 1
-			;;
-	esac
-}
-
-# ------------------------------------------------------------
-# TOTP action for autotype
-# ------------------------------------------------------------
-
-get_totp_option() {
-	local selected
-
-	selected=$(
-		printf '%s\n' \
-			"Autotype TOTP" \
-			"Copy TOTP" \
-			"Skip TOTP" |
-			dmenu -i -l 3 -p "TOTP action:"
-	)
-
-	case "$selected" in
-		"Autotype TOTP")
-			printf '%s' "auto"
-			;;
-
-		"Copy TOTP")
-			printf '%s' "copy"
-			;;
-
-		*)
-			printf '%s' "skip"
-			;;
-	esac
-}
-
-# ------------------------------------------------------------
 # Build action menu
 # ------------------------------------------------------------
 
 options=""
 
 if [ -n "$username" ] && [ -n "$password" ]; then
-	options=$'autotype_both|Autotype username + password\ncopy_login|Copy username\ncopy_pwd|Copy password'
+	options=$'login_input|Type username + copy password\ncopy_login|Copy username\ncopy_pwd|Copy password'
 elif [ -n "$password" ]; then
 	options=$'copy_pwd|Copy password'
 elif [ -n "$username" ]; then
@@ -334,10 +350,10 @@ action=$(
 # ------------------------------------------------------------
 
 case "$action" in
-
-autotype_both)
-
-	require_browser
+login_input)
+	# --------------------------------------------------------
+	# 1. Ask about TOTP FIRST
+	# --------------------------------------------------------
 
 	totp_action="skip"
 
@@ -345,122 +361,65 @@ autotype_both)
 		totp_action="$(get_totp_option)"
 	fi
 
-	notify-send "Passwords" "Typing username"
+	# --------------------------------------------------------
+	# 2. Type username
+	#
+	# No Enter is sent.
+	# --------------------------------------------------------
 
-	xdotool type "$username"
-
-	psswd_on_page=$(native_query "page has password")
-
-	if [ "$psswd_on_page" = "true" ]; then
-
-		notify-send "Passwords" "Password field already on page"
-
-		native_query "tab"
-
-		notify-send "Passwords" "Typing password"
-
-		xdotool type "$password"
-		xdotool key Return
-
-	else
-
-		notify-send "Passwords" "Waiting for password page"
-
-		xdotool key Return
-
-		password_ready=$(native_query "wait password")
-
-		if [ "$password_ready" = "true" ]; then
-
-			notify-send "Passwords" "Password field found"
-
-			xdotool type "$password"
-			xdotool key Return
-
-		else
-
-			notify-send "Passwords" "Password field never appeared"
-
-		fi
+	if [ -n "$username" ]; then
+		xdotool type -- "$username"
 	fi
 
-	if [ "$totp_action" = "auto" ]; then
+	# --------------------------------------------------------
+	# 3. Copy password to BOTH selections
+	# --------------------------------------------------------
 
-		notify-send "Passwords" "Waiting for TOTP field"
+	copy_password
 
-		native_query "wait totp"
+	# --------------------------------------------------------
+	# 4. Handle TOTP
+	# --------------------------------------------------------
 
-		notify-send "Passwords" "Generating TOTP"
+	case "$totp_action" in
 
-		secret=$(get_totp_secret)
+		wait)
+			# Password has already been copied.
+			# Wait for the user to paste it.
 
-		totp=$(
-			printf '%s\n' "$secret" |
-				python3 "$MINTOTP" |
-				head -n1
-		)
+			if wait_for_input_trigger; then
+				copy_totp
+			fi
+			;;
 
-		is_totp=$(native_query "is totp")
+		copy)
+			# Copy TOTP immediately.
+			copy_totp
+			;;
 
-		if [ "$is_totp" = "true" ]; then
-
-			notify-send "Passwords" "Typing TOTP"
-
-			xdotool type "$totp"
-			xdotool key Return
-
-		else
-
-			notify-send "Passwords" "Tabbing to TOTP field"
-
-			native_query "tab"
-
-			xdotool type "$totp"
-			xdotool key Return
-
-		fi
-
-	elif [ "$totp_action" = "copy" ]; then
-
-		copy_totp
-
-	fi
+		skip)
+			# Leave password in both selections.
+			;;
+	esac
 	;;
-
 copy_login)
-
 	printf '%s' "$username" |
 		xclip -selection clipboard
 	;;
-
 copy_pwd)
-
 	printf '%s' "$password" |
 		xclip -selection clipboard
 	;;
-
 add_totp)
-
 	add_totp
 	;;
-
 copy_totp)
-
 	copy_totp
 	;;
-
 copy_url)
-
 	[ -z "$url" ] && exit 0
 
 	printf '%s' "$url" |
 		xclip -selection clipboard
 	;;
-
-autotype_login)
-
-	xdotool type "$username"
-	xdotool key Return
-	;;
-
 esac
