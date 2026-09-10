@@ -251,7 +251,6 @@ get_totp_option() {
 	selected=$(
 		printf '%s\n' \
 			"Copy TOTP after password paste" \
-			"Copy TOTP now" \
 			"Skip TOTP" |
 			dmenu -i -l 3 -p "TOTP action:"
 	)
