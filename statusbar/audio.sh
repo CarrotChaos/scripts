@@ -21,4 +21,5 @@ else
 	fi
 fi
 
-printf '\033[1;4;31m%s %d%%\033[0m\n' "$icon" "$vol"
+printf "^b1^ %s %d%% ^d^\n" "$icon" "$vol"
+

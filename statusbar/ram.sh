@@ -15,4 +15,5 @@ EOF
 used_kb=$((total - free - buffers - cached - sreclaimable + shmem))
 used_mb=$((used_kb / 1024))
 
-printf '\033[1;4;34m %s MB\033[0m\n' "$used_mb"
+printf "^b4^^c#1E1E2E^  %s MB ^d^\n" "$used_mb"
+
