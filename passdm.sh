@@ -118,54 +118,84 @@ has_totp() {
 }
 
 # ------------------------------------------------------------
-# Copy password
+# Save current clipboard selections
 #
-# CLIPBOARD -> Ctrl+V
-# PRIMARY   -> middle-click
+# CLIPBOARD = Ctrl+V
+# PRIMARY   = middle-click
 # ------------------------------------------------------------
 
-copy_password() {
-	printf '%s' "$password" |
-		xclip -selection clipboard
-
-	printf '%s' "$password" |
-		xclip -selection primary
-
-	notify-send "Passwords" "Password copied"
+save_clipboard() {
+	old_clipboard=$(xclip -selection clipboard -o 2>/dev/null || true)
+	old_primary=$(xclip -selection primary -o 2>/dev/null || true)
 }
 
 # ------------------------------------------------------------
-# TOTP
+# Restore previous clipboard selections
+# ------------------------------------------------------------
+
+restore_clipboard() {
+	printf '%s' "$old_clipboard" | xclip -selection clipboard
+	printf '%s' "$old_primary" | xclip -selection primary
+}
+
+# ------------------------------------------------------------
+# Copy a value to both X11 selections
+# ------------------------------------------------------------
+
+copy_to_selections() {
+	local value="$1"
+
+	printf '%s' "$value" | xclip -selection clipboard
+	printf '%s' "$value" | xclip -selection primary
+}
+
+# ------------------------------------------------------------
+# Copy a value for 45 seconds, then restore the old clipboard
+# ------------------------------------------------------------
+
+copy_temporary() {
+	local value="$1"
+	local message="$2"
+
+	save_clipboard
+
+	copy_to_selections "$value"
+
+	notify-send "Passwords" "$message"
+
+	sleep 45
+
+	restore_clipboard
+}
+
+# ------------------------------------------------------------
+# Generate and copy TOTP
 #
-# Copy to both X11 selections so that either Ctrl+V or
-# middle-click can use the newly generated TOTP.
+# This function ONLY copies the TOTP.
+# The caller controls the 45-second restoration timer.
 # ------------------------------------------------------------
 
 copy_totp() {
-	if has_totp; then
-		local totp
-
-		totp=$(
-			printf '%s\n' "$totp_secret" |
-				python3 "$MINTOTP" |
-				head -n1
-		)
-
-		if [ -z "$totp" ]; then
-			notify-send "Passwords" "Could not generate TOTP"
-			return 1
-		fi
-
-		# Ctrl+V
-		printf '%s' "$totp" |
-			xclip -selection clipboard
-
-		# Middle-click
-		printf '%s' "$totp" |
-			xclip -selection primary
-
-		notify-send "Passwords" "TOTP copied"
+	if ! has_totp; then
+		return 1
 	fi
+
+	local totp
+
+	totp=$(
+		printf '%s\n' "$totp_secret" |
+			python3 "$MINTOTP" |
+			head -n1
+	)
+
+	if [ -z "$totp" ]; then
+		notify-send "Passwords" "Could not generate TOTP"
+		return 1
+	fi
+
+	copy_to_selections "$totp"
+
+	notify-send "Passwords" "TOTP copied"
 }
 
 # ------------------------------------------------------------
@@ -176,9 +206,13 @@ copy_totp() {
 # Middle mouse = button 2
 #
 # xinput only observes the events. It does not consume them.
+#
+# Argument:
+#   Number of seconds to wait before timing out.
 # ------------------------------------------------------------
 
 wait_for_input_trigger() {
+	local timeout_seconds="${1:-45}"
 	local detected
 
 	notify-send "Passwords" "Waiting for password paste"
@@ -186,7 +220,8 @@ wait_for_input_trigger() {
 	set +e
 
 	detected=$(
-		stdbuf -oL xinput test-xi2 --root 2>/dev/null |
+		timeout "$timeout_seconds" \
+			stdbuf -oL xinput test-xi2 --root 2>/dev/null |
 		awk '
 		/RawKeyPress/ {
 			event = "press"
@@ -255,13 +290,13 @@ get_totp_option() {
 			dmenu -i -l 3 -p "TOTP action:"
 	)
 
+	if [[ -z "$selected" ]]; then
+		return 1
+	fi
+
 	case "$selected" in
 		"Copy TOTP after password paste")
 			printf '%s' "wait"
-			;;
-
-		"Copy TOTP now")
-			printf '%s' "copy"
 			;;
 
 		*)
@@ -333,7 +368,7 @@ fi
 selected_label=$(
 	printf '%s\n' "$options" |
 		cut -d'|' -f2 |
-		dmenu -i -l 10 -p "Action for $entry_name:"
+	dmenu -i -l 10 -p "Action for $entry_name:"
 )
 
 [ -z "$selected_label" ] && exit 0
@@ -349,76 +384,111 @@ action=$(
 # ------------------------------------------------------------
 
 case "$action" in
-login_input)
-	# --------------------------------------------------------
-	# 1. Ask about TOTP FIRST
-	# --------------------------------------------------------
 
+# ------------------------------------------------------------
+# Type username + copy password
+#
+# The 45-second timer starts when the password is copied.
+#
+# If Ctrl+V/middle-click happens during those 45 seconds:
+#   - TOTP is generated
+#   - TOTP replaces the password
+#   - timer continues
+#   - original clipboard is restored at 45 seconds
+# ------------------------------------------------------------
+
+login_input)
 	totp_action="skip"
 
 	if has_totp; then
 		totp_action="$(get_totp_option)"
 	fi
 
-	# --------------------------------------------------------
-	# 2. Type username
-	#
-	# No Enter is sent.
-	# --------------------------------------------------------
+	# Save original clipboard BEFORE changing anything.
+	save_clipboard
 
+	# Type username.
 	if [ -n "$username" ]; then
 		xdotool type -- "$username"
 	fi
 
-	# --------------------------------------------------------
-	# 3. Copy password to BOTH selections
-	# --------------------------------------------------------
+	# Copy password to both selections.
+	copy_to_selections "$password"
 
-	copy_password
+	notify-send "Passwords" "Password copied"
 
-	# --------------------------------------------------------
-	# 4. Handle TOTP
-	# --------------------------------------------------------
+	# Start the 45-second lifetime timer.
+	start_time=$SECONDS
 
-	case "$totp_action" in
+	# Wait for Ctrl+V / middle click if requested.
+	if [ "$totp_action" = "wait" ]; then
 
-		wait)
-			# Password has already been copied.
-			# Wait for the user to paste it.
-
-			if wait_for_input_trigger; then
-				copy_totp
-			fi
-			;;
-
-		copy)
-			# Copy TOTP immediately.
+		if wait_for_input_trigger 45; then
+			# User triggered TOTP before the timeout.
 			copy_totp
-			;;
+		fi
+	fi
 
-		skip)
-			# Leave password in both selections.
-			;;
-	esac
+	# --------------------------------------------------------
+	# Make sure the total lifetime is 45 seconds.
+	# --------------------------------------------------------
+
+	elapsed=$((SECONDS - start_time))
+
+	if [ "$elapsed" -lt 45 ]; then
+		sleep $((45 - elapsed))
+	fi
+
+	# Restore the clipboard that existed before this action.
+	restore_clipboard
 	;;
+
+# ------------------------------------------------------------
+# Copy username
+# ------------------------------------------------------------
+
 copy_login)
-	printf '%s' "$username" |
-		xclip -selection clipboard
+	copy_temporary "$username" "Username copied"
 	;;
+
+# ------------------------------------------------------------
+# Copy password
+# ------------------------------------------------------------
+
 copy_pwd)
-	printf '%s' "$password" |
-		xclip -selection clipboard
+	copy_temporary "$password" "Password copied"
 	;;
+
+# ------------------------------------------------------------
+# Add TOTP
+# ------------------------------------------------------------
+
 add_totp)
 	add_totp
 	;;
+
+# ------------------------------------------------------------
+# Copy TOTP
+# ------------------------------------------------------------
+
 copy_totp)
-	copy_totp
+	save_clipboard
+
+	if copy_totp; then
+		sleep 45
+		restore_clipboard
+	fi
 	;;
+
+# ------------------------------------------------------------
+# Copy URL
+# ------------------------------------------------------------
+
 copy_url)
 	[ -z "$url" ] && exit 0
 
-	printf '%s' "$url" |
-		xclip -selection clipboard
+	copy_temporary "$url" "URL copied"
 	;;
+
 esac
+
