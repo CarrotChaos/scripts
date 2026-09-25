@@ -15,5 +15,15 @@ EOF
 used_kb=$((total - free - buffers - cached - sreclaimable + shmem))
 used_mb=$((used_kb / 1024))
 
-printf "^b4^^c#1E1E2E^  %s MB ^d^\n" "$used_mb"
+if [ "$total" -gt 0 ]; then
+	used_percent=$((100 * used_kb / total))
+else
+	used_percent=0
+fi
 
+notify-send \
+	--app-name="Memory" \
+	--expire-time=5000 \
+	--hint=string:x-canonical-private-synchronous:memory \
+	"Memory" \
+	"$used_percent% used (${used_mb} MB)"

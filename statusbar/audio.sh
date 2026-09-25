@@ -1,25 +1,47 @@
 #!/bin/sh
 
-sink=$(pactl get-default-sink)
-muted=$(pactl get-sink-mute "$sink" | awk '{print $2}')
+until pactl info >/dev/null 2>&1; do
+    sleep 1
+done
 
-if [ "$muted" = "yes" ]; then
-	vol=0
-	icon=""
-else
-	vol=$(pactl get-sink-volume "$sink" | grep -o '[0-9]\+%' | head -n1 | tr -d '%')
+print_audio() {
+    sink=$(pactl get-default-sink)
+    muted=$(pactl get-sink-mute "$sink" | awk '{print $2}')
 
-	# Safety: if parsing failed, treat as 0
-	[ -z "$vol" ] && vol=0
+    if [ "$muted" = "yes" ]; then
+        icon=""
+    else
+        vol=$(pactl get-sink-volume "$sink" |
+            grep -o '[0-9]\+%' |
+            head -n1 |
+            tr -d '%')
 
-	if [ "$vol" -le 30 ]; then
-		icon=""
-	elif [ "$vol" -le 70 ]; then
-		icon=""
-	else
-		icon=""
-	fi
-fi
+        [ -z "$vol" ] && vol=0
 
-printf "^b1^ %s %d%% ^d^\n" "$icon" "$vol"
+        if [ "$vol" -le 30 ]; then
+            icon=""
+        elif [ "$vol" -le 70 ]; then
+            icon=""
+        else
+            icon=""
+        fi
+    fi
 
+    printf 'icon|string|%s\n' "$icon"
+    printf '\n'
+}
+
+# Initial state
+print_audio
+
+# Update only when Pulse/PipeWire reports an audio change
+pactl subscribe | while IFS= read -r event; do
+    case "$event" in
+        *"Event 'change' on sink"*|\
+        *"Event 'new' on sink"*|\
+        *"Event 'remove' on sink"*|\
+        *"Event 'change' on server"*)
+            print_audio
+            ;;
+    esac
+done

@@ -5,7 +5,7 @@ mkdir -p "$(dirname "$HISTFILE")"
 touch "$HISTFILE"
 
 # Ask whether user wants mount or unmount
-ACTION=$(printf "Mount\nUnmount" | dmenu -i -p "Action:")
+ACTION=$(printf "Mount\nUnmount" | tofi --prompt-text "Action: ")
 [ -z "$ACTION" ] && exit 0
 
 # ----------------------------------------
@@ -16,7 +16,7 @@ if [ "$ACTION" = "Mount" ]; then
 	# List unused partitions
 	DRIVE=$(lsblk -rpno NAME,SIZE,TYPE,MOUNTPOINT |
 		awk '$3=="part" && $4=="" {print $1" ("$2")"}' |
-		dmenu -i -p "Select drive to mount:")
+		tofi --prompt-text "Select drive to mount: ")
 	[ -z "$DRIVE" ] && exit 0
 
 	DEV=$(echo "$DRIVE" | awk '{print $1}')
@@ -25,17 +25,17 @@ if [ "$ACTION" = "Mount" ]; then
 	MOUNTPOINT=$( (
 		cat "$HISTFILE"
 		echo "Other…"
-	) | dmenu -i -p "Mount where?")
+	) | tofi --prompt-text "Mount where: ")
 	[ -z "$MOUNTPOINT" ] && exit 0
 
 	if [ "$MOUNTPOINT" = "Other…" ]; then
-		MOUNTPOINT=$(dmenu -p "Enter mount path:" </dev/null)
+		MOUNTPOINT=$(tofi --prompt-text "Enter mount path: ")
 		[ -z "$MOUNTPOINT" ] && exit 0
 	fi
 
 	# Create directory if missing
 	if [ ! -d "$MOUNTPOINT" ]; then
-		CONFIRM=$(printf "Yes\nNo" | dmenu -i -p "$MOUNTPOINT does not exist. Create?")
+		CONFIRM=$(printf "Yes\nNo" | tofi --prompt-text "$MOUNTPOINT does not exist. Create? ")
 		[ "$CONFIRM" = "Yes" ] || exit 0
 		pkexec mkdir -p "$MOUNTPOINT" || exit 1
 	fi
@@ -63,7 +63,7 @@ if [ "$ACTION" = "Unmount" ]; then
 	# List mounted external drives
 	DRIVE=$(lsblk -rpno NAME,MOUNTPOINT,TYPE |
 		awk '$3=="part" && $2!="" {print $1" → "$2}' |
-		dmenu -i -p "Select drive to unmount:")
+		tofi --prompt-text "Select drive to unmount: ")
 	[ -z "$DRIVE" ] && exit 0
 
 	DEV=$(echo "$DRIVE" | awk '{print $1}')

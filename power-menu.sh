@@ -1,22 +1,22 @@
 #!/bin/bash
 
-CHOICE=$(printf "Suspend\nReboot\nPoweroff\nLock" | dmenu -i -p "Power Menu:")
+CHOICE=$(printf "Suspend\nReboot\nPoweroff\nLock" | tofi)
 
 case "$CHOICE" in
-Suspend)
-	slock &
-	loginctl suspend
-	;;
-Reboot)
-	loginctl reboot
-	;;
-Poweroff)
-	loginctl poweroff
-	;;
-Lock)
-	slock &
-	;;
-*)
-	exit 0
-	;;
+    Suspend)
+        wlock &
+        loginctl suspend
+        ;;
+    Reboot)
+        loginctl reboot
+        ;;
+    Poweroff)
+        loginctl poweroff
+        ;;
+    Lock)
+        slock &
+        ;;
+    *)
+        exit 0
+        ;;
 esac
