@@ -73,7 +73,11 @@ run_tofi()
     local input="$1"
     local prompt="$2"
 
-    tofi --prompt-text="$prompt" <<< "$input"
+    tofi \
+        --width=900 \
+        --height=600 \
+        --prompt-text="$prompt" \
+        <<< "$input"
 }
 
 
@@ -129,11 +133,7 @@ select_entry()
 
     [[ -n "$entries" ]] || return 1
 
-    if selected=$(
-        printf '%s\n' "$entries" |
-            tofi --prompt-text="Pass: "
-    ); then
-
+    if selected=$(run_tofi "$entries" "Pass: "); then
         [[ -n "$selected" ]] || return 1
 
         printf '%s\n' "$selected"
@@ -342,11 +342,7 @@ show_options()
 
     prompt="$entry: "
 
-    if ! choice=$(
-        printf '%s' "$options" |
-            tofi --prompt-text="$prompt"
-    ); then
-
+    if ! choice=$(run_tofi "$options" "$prompt"); then
         # Esc from options.
         return 1
     fi
