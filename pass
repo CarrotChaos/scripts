@@ -1,0 +1,368 @@
+#!/bin/sh
+# Simple password manager with GPG encryption and TOTP support.
+
+pw_add() {
+    name=$1
+
+    if yn "Generate a password?"; then
+        pass=$(LC_ALL=C tr -dc "${PASS_PATTERN:-_A-Z-a-z-0-9}" < /dev/urandom |
+            dd ibs=1 obs=1 count="${PASS_LENGTH:-50}" 2>/dev/null)
+    else
+        sread pass "Enter password"
+        sread pass2 "Enter password (again)"
+        [ "$pass" = "$pass2" ] || die "Passwords do not match"
+    fi
+
+    [ "$pass" ] || die "Failed to generate a password"
+
+    # A recipient saved by reencrypt takes precedence over PASS_KEYID.
+    if [ -f .gpg-id ]; then
+        IFS= read -r keyid < .gpg-id || :
+        [ "$keyid" ] || die "Empty .gpg-id configuration"
+    else
+        keyid=$PASS_KEYID
+    fi
+
+    if [ "$keyid" ]; then
+        set -- --batch --trust-model always -aer "$keyid"
+    else
+        set -- -c
+    fi
+
+    "$gpg" "$@" -o "$name.gpg" <<-EOF &&
+		$pass
+	EOF
+    printf '%s\n' "Saved '$name' to the store."
+}
+
+pw_del() {
+    yn "Delete pass file '$1'?" && {
+        rm -f "$1.gpg"
+        rmdir -p "${1%/*}" 2>/dev/null || :
+    }
+}
+
+pw_show() {
+    "$gpg" -dq "$1.gpg"
+}
+
+pw_copy() {
+    : "${PASS_CLIP:=xclip -sel c}"
+
+    [ "$PASS_TIMEOUT" != off ] && {
+        printf 'Clearing clipboard in "%s" seconds.\n' "${PASS_TIMEOUT:=15}"
+        sleep "$PASS_TIMEOUT" || kill 0
+        # shellcheck disable=2086
+        $PASS_CLIP </dev/null
+    } &
+
+    # Copy only the first line of the entry.
+    # shellcheck disable=2086
+    pw_show "$1" | sed -n '1p' | $PASS_CLIP
+}
+
+pw_totp() {
+    name=$1
+    clip=$2
+
+    [ -f "$PASS_SCRIPT_DIR/mintotp.py" ] ||
+        die "mintotp.py not found in '$PASS_SCRIPT_DIR'"
+
+    secret=$(pw_show "$name" |
+        sed -n '/^Totp:/ {
+            s/^Totp:[[:space:]]*//
+            p
+            q
+        }') || die "Failed to read TOTP secret"
+
+    [ "$secret" ] || die "No Totp secret found in '$name'"
+
+    code=$(printf '%s\n' "$secret" |
+        python3 "$PASS_SCRIPT_DIR/mintotp.py") ||
+        die "Failed to generate TOTP"
+
+    [ "$code" ] || die "Failed to generate TOTP"
+
+    if [ "$clip" = yes ]; then
+        : "${PASS_CLIP:=xclip -sel c}"
+
+        [ "$PASS_TIMEOUT" != off ] && {
+            printf 'Clearing clipboard in "%s" seconds.\n' "${PASS_TIMEOUT:=15}"
+            sleep "$PASS_TIMEOUT" || kill 0
+            # shellcheck disable=2086
+            $PASS_CLIP </dev/null
+        } &
+
+        # shellcheck disable=2086
+        printf '%s' "$code" | $PASS_CLIP ||
+            die "Failed to copy TOTP to clipboard"
+
+        printf '%s\n' "TOTP copied to clipboard."
+    else
+        printf '%s\n' "$code"
+    fi
+}
+
+pw_list() {
+    find . -type f -name '*.gpg' |
+        sed 's/^\.\///;s/\.gpg$//'
+}
+
+pw_tree() {
+    command -v tree >/dev/null 2>&1 ||
+        die "'tree' command not found"
+
+    tree --noreport | sed 's/\.gpg$//'
+}
+
+pw_reencrypt() {
+    keyid=$1
+
+    [ "$keyid" ] || die "Missing GPG key ID"
+
+    # Verify that the new public key exists.
+    "$gpg" --list-keys "$keyid" >/dev/null 2>&1 ||
+        die "GPG public key '$keyid' not found"
+
+    umask 077
+
+    # Stage replacements and backups inside the store.
+    stage=$(mktemp -d ./.pass-reencrypt.XXXXXX) ||
+        die "Couldn't create temporary directory"
+
+    mkdir -p "$stage/entries" "$stage/backups" || {
+        rm -rf "$stage"
+        die "Couldn't create staging directories"
+    }
+
+    # Encrypt every entry for the new key without touching originals.
+    # Backups are also prepared so the commit can be rolled back.
+    if ! find . -type f -name '*.gpg' -print |
+        while IFS= read -r file; do
+            rel=${file#./}
+            out="$stage/entries/$rel.new"
+            backup="$stage/backups/$rel.bak"
+
+            mkdir -p "${out%/*}" "${backup%/*}" || exit 1
+
+            cp -p "$file" "$backup" || exit 1
+
+            "$gpg" -dq "$file" > "$stage/plain" || exit 1
+
+            "$gpg" --batch --yes --trust-model always \
+                -e -r "$keyid" \
+                -o "$out" "$stage/plain" || exit 1
+
+            # Verify that the newly encrypted entry can be decrypted
+            # with the available secret key before committing it.
+            "$gpg" -dq "$out" >/dev/null || exit 1
+        done
+    then
+        rm -rf "$stage"
+        die "Staging failed; original entries were not replaced"
+    fi
+
+    # Prepare the new recipient configuration.
+    printf '%s\n' "$keyid" > "$stage/gpg-id" || {
+        rm -rf "$stage"
+        die "Couldn't prepare GPG key configuration"
+    }
+
+    # Back up the existing configuration, if present.
+    if [ -f .gpg-id ]; then
+        cp -p .gpg-id "$stage/old-gpg-id" || {
+            rm -rf "$stage"
+            die "Couldn't back up existing GPG key configuration"
+        }
+    fi
+
+    # Commit the new encrypted entries.
+    if ! find "$stage/entries" -type f -name '*.new' -print |
+        while IFS= read -r staged; do
+            rel=${staged#"$stage/entries"/}
+            target=${rel%.new}
+
+            mv "$staged" "$target" || exit 1
+        done
+    then
+        # Restore original entries if the commit failed.
+        if find "$stage/backups" -type f -name '*.bak' -print |
+            while IFS= read -r backup; do
+                rel=${backup#"$stage/backups"/}
+                target=${rel%.bak}
+                cp -p "$backup" "$target" || exit 1
+            done
+        then
+            rm -rf "$stage"
+            die "Commit failed; original entries were restored"
+        else
+            die "Commit and rollback failed; inspect '$PASS_DIR' and '$stage'"
+        fi
+    fi
+
+    # Save the new default recipient.
+    if ! mv "$stage/gpg-id" .gpg-id; then
+        # Restore entries and the old recipient configuration.
+        rollback_failed=no
+
+        find "$stage/backups" -type f -name '*.bak' -print |
+            while IFS= read -r backup; do
+                rel=${backup#"$stage/backups"/}
+                target=${rel%.bak}
+                cp -p "$backup" "$target" || exit 1
+            done || rollback_failed=yes
+
+        if [ -f "$stage/old-gpg-id" ]; then
+            cp -p "$stage/old-gpg-id" .gpg-id || rollback_failed=yes
+        else
+            rm -f .gpg-id || rollback_failed=yes
+        fi
+
+        if [ "$rollback_failed" = yes ]; then
+            die "Configuration update and rollback failed; inspect '$PASS_DIR' and '$stage'"
+        fi
+
+        rm -rf "$stage"
+        die "Couldn't save new key configuration; original entries were restored"
+    fi
+
+    rm -rf "$stage"
+    printf "Password store re-encrypted for '%s'.\n" "$keyid"
+}
+
+yn() {
+    printf '%s [y/n]: ' "$1"
+    stty -icanon
+    answer=$(dd ibs=1 count=1 2>/dev/null)
+    stty icanon
+    printf '\n'
+    glob "$answer" '[yY]'
+}
+
+sread() {
+    printf '%s: ' "$2"
+    stty -echo
+    read -r "$1"
+    stty echo
+    printf '\n'
+}
+
+glob() {
+    # shellcheck disable=2254
+    case $1 in $2) return 0 ;; esac
+    return 1
+}
+
+die() {
+    printf 'error: %s.\n' "$1" >&2
+    exit 1
+}
+
+usage() {
+    printf '%s\n' "\
+pass 2.4.0 - simple password manager.
+
+=> [a]dd  [name]          - Create a new password entry.
+=> [c]opy [name]          - Copy first line to the clipboard.
+=> [d]el  [name]          - Delete a password entry.
+=> [l]ist                 - List all entries.
+=> [o]tp  [-c|--clip] [name] - Generate or copy a TOTP code.
+=> reencrypt [key-id]     - Re-encrypt entries for a new GPG key.
+=> [s]how [name]          - Show full entry.
+=> [t]ree                 - List all entries in a tree.
+
+Key ID:             export PASS_KEYID=XXXXXXXX
+Password length:    export PASS_LENGTH=50
+Password pattern:   export PASS_PATTERN=_A-Z-a-z-0-9
+Store location:     export PASS_DIR=~/.local/share/pass
+Clipboard tool:     export PASS_CLIP='xclip -sel c'
+Clipboard timeout:  export PASS_TIMEOUT=15 ('off' to disable)
+"
+    exit 0
+}
+
+main() {
+    : "${PASS_DIR:=${XDG_DATA_HOME:=$HOME/.local/share}/pass}"
+
+    PASS_SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd) ||
+        die "Couldn't locate script directory"
+
+    command -v gpg >/dev/null 2>&1 && gpg=gpg
+    command -v gpg2 >/dev/null 2>&1 && gpg=gpg2
+    [ "$gpg" ] || die "GPG not found"
+
+    mkdir -p "$PASS_DIR" ||
+        die "Couldn't create password directory"
+
+    cd "$PASS_DIR" ||
+        die "Can't access password directory"
+
+    # Handle key rotation before normal entry-name validation.
+    case $1 in
+        reencrypt)
+            [ "$2" ] || die "Missing GPG key ID"
+            [ -z "$3" ] || die "Too many arguments for reencrypt"
+            export GPG_TTY=${GPG_TTY:-$(tty)}
+            pw_reencrypt "$2"
+            return
+            ;;
+    esac
+
+    # Support: pass otp -c name and pass otp --clip name.
+    otp_clip=no
+    case $1 in
+        o*)
+            case $2 in
+                -c|--clip)
+                    otp_clip=yes
+                    set -- "$1" "$3"
+                    ;;
+            esac
+            ;;
+    esac
+
+    glob "$1" '[acdos]*' && [ -z "$2" ] &&
+        die "Missing [name] argument"
+
+    glob "$1" '[cdos]*' && [ ! -f "$2.gpg" ] &&
+        die "Pass file '$2' doesn't exist"
+
+    glob "$1" 'a*' && [ -f "$2.gpg" ] &&
+        die "Pass file '$2' already exists"
+
+    case "/$2/" in
+        */../*) die "Category went out of bounds" ;;
+    esac
+
+    case $2 in
+        /*) die "Category can't start with '/'" ;;
+    esac
+
+    glob "$2" '*/*' && {
+        mkdir -p "${2%/*}" ||
+            die "Couldn't create category '${2%/*}'"
+    }
+
+    export GPG_TTY=${GPG_TTY:-$(tty)}
+    umask 077
+
+    [ -t 1 ] && trap 'stty echo icanon' INT EXIT
+
+    case $1 in
+        a*) pw_add "$2" ;;
+        c*) pw_copy "$2" ;;
+        d*) pw_del "$2" ;;
+        l*) pw_list ;;
+        o*) pw_totp "$2" "$otp_clip" ;;
+        s*) pw_show "$2" ;;
+        t*) pw_tree ;;
+        *)  usage ;;
+    esac
+}
+
+set +x
+set -f
+
+[ "$1" ] || usage
+main "$@"
+

@@ -1,424 +1,180 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -u
 
-PASSWORD_STORE="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
-MINTOTP="$HOME/scripts/mintotp.py"
+PASS_BIN="$HOME/scripts/pass"
+CACHE_SECONDS=45
+CACHE_PATH="${XDG_CACHE_HOME:-$HOME/.cache}/pass-type-keys-last"
+STORE="${PASS_DIR:-${PASH_DIR:-${PASSWORD_STORE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/pass}}}"
+TMP=$(mktemp -d) || exit 1
+chmod 700 "$TMP"
+trap 'rm -rf "$TMP"' EXIT
 
-# ------------------------------------------------------------
-# Find all GNU pass entries
-# ------------------------------------------------------------
+mkdir -p "$(dirname "$CACHE_PATH")"
+chmod 700 "$(dirname "$CACHE_PATH")" 2>/dev/null || :
 
-if [ ! -d "$PASSWORD_STORE" ]; then
-	notify-send "Passwords" "Password store not found: $PASSWORD_STORE"
-	exit 1
-fi
-
-selection=$(
-	find "$PASSWORD_STORE" -type f -name '*.gpg' |
-		sed "s#^$PASSWORD_STORE/##; s/\.gpg$//" |
-		sort |
-		dmenu -i -l 10 -p "Select entry:"
-)
-
-[ -z "$selection" ] && exit 0
-
-entry_name="$selection"
-
-# ------------------------------------------------------------
-# Read entry from GNU pass
-# ------------------------------------------------------------
-
-entry_contents=$(pass show "$entry_name") || {
-	notify-send "Passwords" "Could not read $entry_name"
-	exit 1
+run_dmenu() {
+    printf '%s\n' "$1" | dmenu -i -l 15 -p "$2"
 }
 
-mapfile -t entry_lines <<< "$entry_contents"
-
-if [ "${#entry_lines[@]}" -eq 0 ]; then
-	notify-send "Passwords" "Entry is empty."
-	exit 1
-fi
-
-# ------------------------------------------------------------
-# Parse pass entry
-#
-# First line = password
-# Username: username
-# Totp: secret
-# Notes: ...
-# URL: ...
-# ------------------------------------------------------------
-
-username=""
-password="${entry_lines[0]}"
-totp_secret=""
-url=""
-notes=""
-
-in_notes=false
-
-for ((i = 1; i < ${#entry_lines[@]}; i++)); do
-	line="${entry_lines[i]}"
-
-	if [ "$in_notes" = true ]; then
-		if [ -n "$notes" ]; then
-			notes+=$'\n'
-		fi
-
-		notes+="$line"
-		continue
-	fi
-
-	case "$line" in
-		Username:*|username:*)
-			username="${line#*:}"
-			username="${username# }"
-			;;
-
-		Totp:*|totp:*)
-			totp_secret="${line#*:}"
-			totp_secret="${totp_secret# }"
-			;;
-
-		URL:*|url:*)
-			url="${line#*:}"
-			url="${url# }"
-			;;
-
-		Notes:*|notes:*)
-			note="${line#*:}"
-			note="${note# }"
-
-			notes="$note"
-			in_notes=true
-			;;
-	esac
-done
-
-get_password() {
-	printf '%s' "$password"
+get_entries() {
+    [[ -d "$STORE" ]] || return 1
+    find "$STORE" -type f -name '*.gpg' |
+        sed "s|^$STORE/||;s/\.gpg$//" |
+        sort -f
 }
 
-get_username() {
-	printf '%s' "$username"
+run_pass() {
+    "$PASS_BIN" "$@" && return 0
+    command -v st >/dev/null 2>&1 || return 1
+    st -e sh -c '
+        export GPG_TTY=$(tty)
+        "$@"
+    ' sh "$PASS_BIN" "$@"
 }
 
-get_url() {
-	printf '%s' "$url"
+
+get_contents() {
+    local entry=$1 gpg_bin=gpg
+
+    command -v gpg2 >/dev/null 2>&1 && gpg_bin=gpg2
+
+    # Try silently using an already-cached GPG passphrase.
+    if "$gpg_bin" --batch --pinentry-mode error -dq \
+        "$STORE/$entry.gpg" > "$TMP/raw" 2>/dev/null; then
+        cat "$TMP/raw"
+        return 0
+    fi
+
+    # A passphrase is needed: open a real terminal for pinentry.
+    if ! command -v st >/dev/null 2>&1; then
+        printf '%s\n' "Error: st is not in PATH" >&2
+        return 1
+    fi
+
+    st -e sh -c '
+        export GPG_TTY=$(tty)
+        gpg-connect-agent updatestartuptty /bye >/dev/null 2>&1 || :
+
+        "$1" show "$2" > "$3"
+        rc=$?
+
+        if [ "$rc" -ne 0 ]; then
+            printf "\nDecryption failed (exit %s).\nPress Enter to close." "$rc"
+            read -r _
+        fi
+        exit "$rc"
+    ' sh "$PASS_BIN" "$entry" "$TMP/raw" || return 1
+
+    cat "$TMP/raw"
 }
 
-get_totp_secret() {
-	printf '%s' "$totp_secret"
+
+copy_username() {
+    local value=$1 timeout=${PASS_TIMEOUT:-15}
+
+    printf '%s' "$value" | xclip -selection clipboard -i || return 1
+
+    [[ "$timeout" == off ]] && return 0
+    (
+        sleep "$timeout"
+        printf '' | xclip -selection clipboard -i
+    ) >/dev/null 2>&1 &
 }
 
-has_totp() {
-	[ -n "$totp_secret" ]
+select_entry() {
+    local entries
+    entries=$(get_entries) || return 1
+    [[ -n "$entries" ]] || return 1
+    run_dmenu "$entries" "Pass: "
 }
 
-# ------------------------------------------------------------
-# Copy password
-#
-# CLIPBOARD -> Ctrl+V
-# PRIMARY   -> middle-click
-# ------------------------------------------------------------
+show_options() {
+    local entry=$1 raw line value first=1
+    local username="" has_totp=0 password=""
+    local options="" choice
 
-copy_password() {
-	printf '%s' "$password" |
-		xclip -selection clipboard
+    raw=$(get_contents "$entry") || return 2
 
-	printf '%s' "$password" |
-		xclip -selection primary
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if (( first )); then
+            password=$line
+            first=0
+            continue
+        fi
+        case "$line" in
+            Username:*)
+                value=${line#Username:}
+                username=$(printf '%s' "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                ;;
+            Totp:*) has_totp=1 ;;
+        esac
+    done <<< "$raw"
 
-	notify-send "Passwords" "Password copied"
+    [[ -n "$username" ]] && options+="Copy username"$'\n'
+    [[ -n "$password" ]] && options+="Copy password"$'\n'
+    (( has_totp )) && options+="Copy TOTP"$'\n'
+    [[ -n "$options" ]] || return 2
+
+    choice=$(run_dmenu "$options" "$entry: ") || return 1
+
+    case "$choice" in
+        "Copy username")
+            copy_username "$username" && return 0
+            ;;
+        "Copy password")
+            run_pass copy "$entry" && return 0
+            ;;
+        "Copy TOTP")
+            run_pass otp -c "$entry" && return 0
+            ;;
+        *) return 1 ;;
+    esac
+    return 2
 }
 
-# ------------------------------------------------------------
-# TOTP
-#
-# Copy to both X11 selections so that either Ctrl+V or
-# middle-click can use the newly generated TOTP.
-# ------------------------------------------------------------
+load_cached_entry() {
+    [[ -f "$CACHE_PATH" ]] || return 1
 
-copy_totp() {
-	if has_totp; then
-		local totp
+    local timestamp entry
+    IFS= read -r timestamp < "$CACHE_PATH" || return 1
+    entry=$(tail -n +2 "$CACHE_PATH") || return 1
 
-		totp=$(
-			printf '%s\n' "$totp_secret" |
-				python3 "$MINTOTP" |
-				head -n1
-		)
+    [[ "$timestamp" =~ ^[0-9]+$ && -n "$entry" ]] || return 1
+    (( $(date +%s) - timestamp >= 0 &&
+       $(date +%s) - timestamp <= CACHE_SECONDS )) || return 1
 
-		if [ -z "$totp" ]; then
-			notify-send "Passwords" "Could not generate TOTP"
-			return 1
-		fi
-
-		# Ctrl+V
-		printf '%s' "$totp" |
-			xclip -selection clipboard
-
-		# Middle-click
-		printf '%s' "$totp" |
-			xclip -selection primary
-
-		notify-send "Passwords" "TOTP copied"
-	fi
+    printf '%s\n' "$entry"
 }
 
-# ------------------------------------------------------------
-# Wait for Ctrl+V or middle click
-#
-# Ctrl = keycode 37
-# V    = keycode 55
-# Middle mouse = button 2
-#
-# xinput only observes the events. It does not consume them.
-# ------------------------------------------------------------
-
-wait_for_input_trigger() {
-	local detected
-
-	notify-send "Passwords" "Waiting for password paste"
-
-	set +e
-
-	detected=$(
-		stdbuf -oL xinput test-xi2 --root 2>/dev/null |
-		awk '
-		/RawKeyPress/ {
-			event = "press"
-		}
-
-		/RawKeyRelease/ {
-			event = "release"
-		}
-
-		/RawButtonPress/ {
-			event = "button"
-		}
-
-		/^[[:space:]]*detail:/ {
-			code = $2
-
-			# Ctrl pressed
-			if (event == "press" && code == 37)
-				ctrl = 1
-
-			# Ctrl released
-			if (event == "release" && code == 37)
-				ctrl = 0
-
-			# Ctrl+V
-			if (event == "press" && code == 55 && ctrl) {
-				print "CTRLV"
-				fflush()
-				exit
-			}
-
-			# Middle mouse button
-			if (event == "button" && code == 2) {
-				print "MIDDLE"
-				fflush()
-				exit
-			}
-
-			event = ""
-		}
-		'
-	)
-
-	set -e
-
-	case "$detected" in
-		CTRLV|MIDDLE)
-			return 0
-			;;
-	esac
-
-	return 1
+save_cached_entry() {
+    {
+        date +%s
+        printf '%s\n' "$1"
+    } > "$CACHE_PATH"
+    chmod 600 "$CACHE_PATH"
 }
 
-# ------------------------------------------------------------
-# TOTP action menu
-# ------------------------------------------------------------
+main() {
+    local selected cached result
 
-get_totp_option() {
-	local selected
+    if cached=$(load_cached_entry); then
+        show_options "$cached"
+        result=$?
+        (( result == 0 )) && return 0
+        (( result == 2 )) && :
+    fi
 
-	selected=$(
-		printf '%s\n' \
-			"Copy TOTP after password paste" \
-			"Skip TOTP" |
-			dmenu -i -l 3 -p "TOTP action:"
-	)
+    while selected=$(select_entry); do
+        [[ -n "$selected" ]] || continue
+        save_cached_entry "$selected"
 
-	case "$selected" in
-		"Copy TOTP after password paste")
-			printf '%s' "wait"
-			;;
+        show_options "$selected"
+        result=$?
 
-		"Copy TOTP now")
-			printf '%s' "copy"
-			;;
-
-		*)
-			printf '%s' "skip"
-			;;
-	esac
+        (( result == 0 )) && return 0
+        (( result == 2 )) && return 1
+    done
 }
 
-# ------------------------------------------------------------
-# Add TOTP to GNU pass entry
-# ------------------------------------------------------------
-
-add_totp() {
-	local secret
-	local new_contents
-
-	secret=$(
-		xclip -o -selection clipboard 2>/dev/null |
-			tr -d '\n\r '
-	)
-
-	if [ -z "$secret" ]; then
-		notify-send "Passwords" "Clipboard is empty."
-		return 1
-	fi
-
-	new_contents=$(
-		printf '%s\n' "$entry_contents" |
-			sed '/^[Tt]otp:/d'
-	)
-
-	new_contents="${new_contents%$'\n'}"
-	new_contents+=$'\n'
-	new_contents+="Totp: $secret"
-	new_contents+=$'\n'
-
-	printf '%s' "$new_contents" |
-		pass insert --multiline --force "$entry_name"
-
-	notify-send "Passwords" "TOTP updated for $entry_name"
-}
-
-# ------------------------------------------------------------
-# Build action menu
-# ------------------------------------------------------------
-
-options=""
-
-if [ -n "$username" ] && [ -n "$password" ]; then
-	options=$'login_input|Type username + copy password\ncopy_login|Copy username\ncopy_pwd|Copy password'
-elif [ -n "$password" ]; then
-	options=$'copy_pwd|Copy password'
-elif [ -n "$username" ]; then
-	options=$'copy_login|Copy username'
-else
-	exit 1
-fi
-
-if has_totp; then
-	options+=$'\ncopy_totp|Copy TOTP'
-fi
-
-options+=$'\nadd_totp|Add TOTP'
-
-if [ -n "$url" ]; then
-	options+=$'\ncopy_url|Copy URL'
-fi
-
-selected_label=$(
-	printf '%s\n' "$options" |
-		cut -d'|' -f2 |
-		dmenu -i -l 10 -p "Action for $entry_name:"
-)
-
-[ -z "$selected_label" ] && exit 0
-
-action=$(
-	printf '%s\n' "$options" |
-		grep -F "|$selected_label" |
-		cut -d'|' -f1
-)
-
-# ------------------------------------------------------------
-# Actions
-# ------------------------------------------------------------
-
-case "$action" in
-login_input)
-	# --------------------------------------------------------
-	# 1. Ask about TOTP FIRST
-	# --------------------------------------------------------
-
-	totp_action="skip"
-
-	if has_totp; then
-		totp_action="$(get_totp_option)"
-	fi
-
-	# --------------------------------------------------------
-	# 2. Type username
-	#
-	# No Enter is sent.
-	# --------------------------------------------------------
-
-	if [ -n "$username" ]; then
-		xdotool type -- "$username"
-	fi
-
-	# --------------------------------------------------------
-	# 3. Copy password to BOTH selections
-	# --------------------------------------------------------
-
-	copy_password
-
-	# --------------------------------------------------------
-	# 4. Handle TOTP
-	# --------------------------------------------------------
-
-	case "$totp_action" in
-
-		wait)
-			# Password has already been copied.
-			# Wait for the user to paste it.
-
-			if wait_for_input_trigger; then
-				copy_totp
-			fi
-			;;
-
-		copy)
-			# Copy TOTP immediately.
-			copy_totp
-			;;
-
-		skip)
-			# Leave password in both selections.
-			;;
-	esac
-	;;
-copy_login)
-	printf '%s' "$username" |
-		xclip -selection clipboard
-	;;
-copy_pwd)
-	printf '%s' "$password" |
-		xclip -selection clipboard
-	;;
-add_totp)
-	add_totp
-	;;
-copy_totp)
-	copy_totp
-	;;
-copy_url)
-	[ -z "$url" ] && exit 0
-
-	printf '%s' "$url" |
-		xclip -selection clipboard
-	;;
-esac
+main "$@"
