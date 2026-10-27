@@ -1,21 +1,26 @@
 _pass_completion() {
-    local cur cmd store file entry word
+    local cur cmd store file entry i has_name
     local -a entries commands
-    local has_name
-
     COMPREPLY=()
     cur=${COMP_WORDS[COMP_CWORD]}
-    commands=(add copy del list otp show tree)
+    commands=(add a copy c del d list l otp o show s tree t)
 
-    # Complete subcommands: pass <TAB>
     if (( COMP_CWORD == 1 )); then
         COMPREPLY=( $(compgen -W "${commands[*]}" -- "$cur") )
         return
     fi
 
     cmd=${COMP_WORDS[1]}
+    case "$cmd" in
+        a*) cmd=add ;;
+        c*) cmd=copy ;;
+        d*) cmd=del ;;
+        l*) cmd=list ;;
+        o*) cmd=otp ;;
+        s*) cmd=show ;;
+        t*) cmd=tree ;;
+    esac
 
-    # Offer OTP clipboard flags before the entry name.
     if [[ "$cmd" == otp && "$cur" == -* ]]; then
         has_name=0
         for (( i=2; i<COMP_CWORD; i++ )); do
@@ -24,40 +29,29 @@ _pass_completion() {
                 *) has_name=1 ;;
             esac
         done
-
         if (( has_name == 0 )); then
             COMPREPLY=( $(compgen -W "-c --clip" -- "$cur") )
             return
         fi
     fi
 
-    # Only these commands take an entry name.
     case "$cmd" in
         copy|del|otp|show) ;;
         *) return ;;
     esac
 
-    # Use the configured password store.
-    store=${PASS_DIR:-${XDG_DATA_HOME:-"$HOME/.local/share"}/pass}
+    store=${PASS_DIR:-${PASH_DIR:-${PASSWORD_STORE_DIR:-${XDG_DATA_HOME:-"$HOME/.local/share"}/pass}}}
     [[ -d "$store" ]] || return
 
-    # Collect entry names, preserving spaces.
     while IFS= read -r -d '' file; do
         entry=${file#"$store"/}
         entry=${entry%.gpg}
-        entries+=("$entry")
+        [[ "$entry" == "$cur"* ]] && entries+=("$entry")
     done < <(find "$store" -type f -name '*.gpg' -print0 2>/dev/null)
 
-    # Return entries matching the typed prefix.
-    for entry in "${entries[@]}"; do
-        if [[ "$entry" == "$cur"* ]]; then
-            COMPREPLY+=("$entry")
-        fi
-    done
-
-    # Allow Bash to complete paths containing spaces.
+    COMPREPLY=("${entries[@]}")
     compopt -o filenames 2>/dev/null || :
 }
 
-# Register completion for the command and your alias.
 complete -F _pass_completion pass
+
