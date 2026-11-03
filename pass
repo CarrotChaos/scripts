@@ -58,7 +58,7 @@ pw_copy() {
 
     # Copy only the first line of the entry.
     # shellcheck disable=2086
-    pw_show "$1" | sed -n '1p' | $PASS_CLIP
+    pw_show "$1" | sed -n '1p' | tr -d '\n' | $PASS_CLIP
 }
 
 pw_totp() {

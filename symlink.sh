@@ -4,7 +4,7 @@ set -e
 DOTFILES="$HOME/dotfiles"
 
 # Link top-level dotfiles.
-for file in .bashrc .Xresources; do
+for file in .bashrc .bash_profile .xinitrc .Xresources; do
     if [ -e "$DOTFILES/$file" ]; then
         ln -sf "$DOTFILES/$file" "$HOME/$file"
     fi
