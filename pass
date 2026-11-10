@@ -659,28 +659,49 @@ edit_entry() {
     decode_record "$record"
     original_title=$title
     original_username=$username
+
     {
         printf 'Title: %s\nUsername: %s\nPassword: %s\nTotp: %s\nURL: %s\nNotes:\n' \
             "$title" "$username" "$password" "$totp" "$url"
         cat "$WORK/notes"
     } > "$WORK/entry" || die "Cannot prepare entry for editing."
+
     chmod 600 "$WORK/entry" || die "Cannot secure editor file."
     "$EDITOR_CMD" "$WORK/entry" || die "Editor failed."
 
-    for field in Title Username Password Totp URL; do
-        grep -q "^$field: " "$WORK/entry" || die "Missing $field field."
+    # Require only Title and Password.
+    for field in Title Password; do
+        sed -n '/^Notes:$/q; /^'"$field"': /p' "$WORK/entry" |
+            grep -q . || die "Missing $field field."
     done
-    grep -q '^Notes:$' "$WORK/entry" || die "Missing Notes field."
-    title=$(sed -n '1s/^Title: //p' "$WORK/entry")
-    username=$(sed -n '2s/^Username: //p' "$WORK/entry")
-    password=$(sed -n '3s/^Password: //p' "$WORK/entry")
-    totp=$(sed -n '4s/^Totp: //p' "$WORK/entry")
-    url=$(sed -n '5s/^URL: //p' "$WORK/entry")
-    sed '1,6d' "$WORK/entry" > "$WORK/notes" ||
+
+    # Read fields by label, not line number. Username, Totp and URL
+    # may be omitted or left blank.
+    edit_field() {
+        sed -n '/^Notes:$/q; /^'"$1"': /{
+            s/^'"$1"': //
+            p
+            q
+        }' "$WORK/entry"
+    }
+
+    title=$(edit_field Title)
+    username=$(edit_field Username)
+    password=$(edit_field Password)
+    totp=$(edit_field Totp)
+    url=$(edit_field URL)
+
+    # Notes are everything after the Notes: marker; an empty section is OK.
+    grep -q '^Notes:$' "$WORK/entry" ||
+        die "Missing Notes field."
+    sed -n '/^Notes:$/,$p' "$WORK/entry" |
+        sed '1d' > "$WORK/notes" ||
         die "Cannot read edited notes."
 
     [ -n "$title" ] || die "Title cannot be empty."
-    case "$title" in */*) die "Title cannot contain /. " ;; esac
+    case "$title" in
+        */*) die "Title cannot contain /." ;;
+    esac
     [ -n "$password" ] || die "Password cannot be empty."
 
     # Exclude the original record before checking the new title/username key.
@@ -688,6 +709,7 @@ edit_entry() {
         "$(encode_value "$original_username")"
     mv "$WORK/updated" "$WORK/without-old" ||
         die "Cannot prepare database for duplicate checking."
+
     if entry_exists_in "$WORK/without-old"; then
         die "That username already exists under this title."
     fi
@@ -695,6 +717,7 @@ edit_entry() {
     store_record "$original_title" "$original_username"
     printf 'Entry updated: %s/%s\n' "$title" "$username"
 }
+
 
 show_entry() {
     [ "$#" -eq 1 ] || usage
