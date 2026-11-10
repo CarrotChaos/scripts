@@ -1,18 +1,25 @@
 #!/bin/sh
-# Simple GPG-backed password store. POSIX shell; no Bash-specific features.
+# GPG-backed password store. POSIX shell.
 umask 077
 : "${HOME:?HOME is not set}"
+
+# Resolve the directory containing this script so helper programs work
+# regardless of the caller's current working directory.
+case "$0" in
+    */*) PASS_SCRIPT=$0 ;;
+    *) PASS_SCRIPT=$(command -v "$0" 2>/dev/null || printf '%s' "$0") ;;
+esac
+PASS_DIR=$(CDPATH= cd -P "$(dirname "$PASS_SCRIPT")" 2>/dev/null && pwd) ||
+    PASS_DIR=.
+
 DB=$HOME/passwords.gpg
 TAB=$(printf '\t')
 EDITOR_CMD=${VISUAL:-${EDITOR:-vi}}
-WORK=
-NEWDB=
-DB_WAS_OLD=no
+WORK= NEWDB= DB_WAS_OLD=no
 CACHE_SECONDS=${PASS_CACHE_SECONDS:-60}
-CACHE_DIR=
-CACHE_DATABASE=
-CACHE_META=
+CACHE_DIR= CACHE_DATABASE= CACHE_META=
 ECHO_DISABLED=no
+
 restore_echo() {
     if [ "$ECHO_DISABLED" = yes ]; then
         stty echo 2>/dev/null || :
@@ -21,21 +28,15 @@ restore_echo() {
 }
 cleanup() {
     restore_echo
-    if [ -n "$WORK" ] && [ -d "$WORK" ]; then
-        rm -rf "$WORK"
-    fi
-    if [ -n "$NEWDB" ] && [ -f "$NEWDB" ]; then
-        rm -f "$NEWDB"
-    fi
+    [ -z "$WORK" ] || [ ! -d "$WORK" ] || rm -rf "$WORK"
+    [ -z "$NEWDB" ] || [ ! -f "$NEWDB" ] || rm -f "$NEWDB"
 }
-die() {
-    printf 'Error: %s\n' "$*" >&2
-    exit 1
-}
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 trap cleanup 0
 trap 'exit 1' HUP INT TERM
+
 usage() {
-    cat <<'USAGE'
+    cat <<'EOF'
 Usage:
   pass init KEYID_OR_EMAIL
   pass rekey KEYID_OR_EMAIL
@@ -43,7 +44,7 @@ Usage:
   pass add
   pass edit TITLE[/USERNAME]
   pass show TITLE[/USERNAME]
-  pass copy [--username|-u | --password|-p | --notes|-n | --url|-l] TITLE[/USERNAME]
+  pass copy [--username|-u | --password|-p | --notes|-n | --url|-l] TITLE/USERNAME
   pass list
   pass delete TITLE/USERNAME
   pass otp TITLE/USERNAME
@@ -51,12 +52,14 @@ Usage:
   pass otp remove TITLE/USERNAME
   pass qr TITLE/USERNAME
   pass generate [LENGTH] [OPTIONS]
+
 Generate options:
   --length N
   --no-upper
   --no-lower
   --no-numbers
   --no-symbols
+
 Examples:
   pass init YOUR_GPG_KEY_ID
   pass add
@@ -73,7 +76,7 @@ Examples:
   pass generate 32 --no-symbols
   pass rekey NEW_GPG_KEY_ID
   pass lock
-USAGE
+EOF
     exit 1
 }
 
@@ -88,6 +91,7 @@ make_work() {
         die "Cannot create temporary directory."
     chmod 700 "$WORK" || die "Cannot secure temporary directory."
 }
+
 cache_init() {
     case "$CACHE_SECONDS" in
         ''|*[!0-9]*) CACHE_SECONDS=60 ;;
@@ -104,246 +108,219 @@ cache_init() {
     CACHE_DIR=$cache_base/pass-cache-$cache_uid
     if [ ! -d "$CACHE_DIR" ]; then
         (umask 077 && mkdir "$CACHE_DIR") 2>/dev/null || {
-            CACHE_DIR=
-            return 0
+            CACHE_DIR=; return 0
         }
     fi
     cache_info=$(ls -ldn "$CACHE_DIR" 2>/dev/null) || {
-        CACHE_DIR=
-        return 0
+        CACHE_DIR=; return 0
     }
     cache_kind=$(printf '%s\n' "$cache_info" | cut -c1)
-    cache_owner=$(printf '%s\n' "$cache_info" | awk '{ print $3 }')
-    [ "$cache_kind" = d ] && [ "$cache_owner" = "$cache_uid" ] || {
-        CACHE_DIR=
-        return 0
-    }
+    cache_owner=$(printf '%s\n' "$cache_info" | awk '{print $3}')
+    if [ "$cache_kind" != d ] || [ "$cache_owner" != "$cache_uid" ]; then
+        CACHE_DIR=; return 0
+    fi
     chmod 700 "$CACHE_DIR" 2>/dev/null || {
-        CACHE_DIR=
-        return 0
+        CACHE_DIR=; return 0
     }
     CACHE_DATABASE=$CACHE_DIR/database
     CACHE_META=$CACHE_DIR/meta
 }
+
 cache_clear() {
-    [ -n "$CACHE_DIR" ] || return 0
-    rm -f "$CACHE_DATABASE" "$CACHE_META" 2>/dev/null || :
+    [ -z "$CACHE_DIR" ] ||
+        rm -f "$CACHE_DATABASE" "$CACHE_META" 2>/dev/null || :
 }
 cache_signature() {
-    cksum < "$DB" | awk '{ print $1 ":" $2 }'
-}
-
-cache_read() {
-    expected_signature=$1
-    [ "$CACHE_SECONDS" -gt 0 ] || return 1
-    [ -n "$CACHE_DIR" ] || return 1
-    if [ ! -f "$CACHE_DATABASE" ] || [ ! -f "$CACHE_META" ]; then
-        cache_clear
-        return 1
-    fi
-    {
-        IFS= read -r cached_signature || { cache_clear; return 1; }
-        IFS= read -r cached_time || { cache_clear; return 1; }
-        IFS= read -r cached_old || { cache_clear; return 1; }
-    } < "$CACHE_META"
-    [ "$cached_signature" = "$expected_signature" ] || { cache_clear; return 1; }
-    case "$cached_time" in ''|*[!0-9]*) cache_clear; return 1 ;; esac
-    case "$cached_old" in yes|no) ;; *) cache_clear; return 1 ;; esac
-    now=$(date +%s 2>/dev/null) || { cache_clear; return 1; }
-    age=$((now - cached_time))
-    [ "$age" -ge 0 ] && [ "$age" -le "$CACHE_SECONDS" ] || { cache_clear; return 1; }
-    cp "$CACHE_DATABASE" "$WORK/decrypted" 2>/dev/null || { cache_clear; return 1; }
-    chmod 600 "$WORK/decrypted" 2>/dev/null || { cache_clear; return 1; }
-    DB_WAS_OLD=$cached_old
-    parse_header
-    cp "$WORK/decrypted" "$WORK/database" || { cache_clear; return 1; }
-    chmod 600 "$WORK/database" 2>/dev/null || { cache_clear; return 1; }
-    return 0
-}
-cache_write() {
-    expected_signature=$1
-    [ "$CACHE_SECONDS" -gt 0 ] || return 0
-    [ -n "$CACHE_DIR" ] || return 0
-    # Do not cache a snapshot if the encrypted database changed mid-command.
-    current_signature=$(cache_signature 2>/dev/null) || return 0
-    [ "$current_signature" = "$expected_signature" ] || return 0
-    now=$(date +%s 2>/dev/null) || return 0
-    cache_tmp_db=$(mktemp "$CACHE_DIR/database.XXXXXX") || return 0
-    if ! cp "$WORK/database" "$cache_tmp_db" || ! chmod 600 "$cache_tmp_db"; then
-        rm -f "$cache_tmp_db"
-        return 0
-    fi
-    mv -f "$cache_tmp_db" "$CACHE_DATABASE" || {
-        rm -f "$cache_tmp_db"
-        return 0
-    }
-    cache_tmp_meta=$(mktemp "$CACHE_DIR/meta.XXXXXX") || return 0
-    if ! printf '%s\n%s\n%s\n' \
-        "$expected_signature" "$now" "$DB_WAS_OLD" > "$cache_tmp_meta" ||
-        ! chmod 600 "$cache_tmp_meta"; then
-        rm -f "$cache_tmp_meta"
-        cache_clear
-        return 0
-    fi
-    mv -f "$cache_tmp_meta" "$CACHE_META" || {
-        rm -f "$cache_tmp_meta"
-        cache_clear
-        return 0
-    }
+    cksum < "$DB" | awk '{print $1 ":" $2}'
 }
 lock_cache() {
     cache_init
     cache_clear
     printf 'Decrypted RAM cache cleared.\n'
 }
+
+cache_read() {
+    expected_signature=$1
+    [ "$CACHE_SECONDS" -gt 0 ] && [ -n "$CACHE_DIR" ] || return 1
+    if [ ! -f "$CACHE_DATABASE" ] || [ ! -f "$CACHE_META" ]; then
+        cache_clear; return 1
+    fi
+    {
+        IFS= read -r cached_signature || { cache_clear; return 1; }
+        IFS= read -r cached_time || { cache_clear; return 1; }
+        IFS= read -r cached_old || { cache_clear; return 1; }
+    } < "$CACHE_META"
+    [ "$cached_signature" = "$expected_signature" ] || {
+        cache_clear; return 1
+    }
+    case "$cached_time" in ''|*[!0-9]*) cache_clear; return 1 ;; esac
+    case "$cached_old" in yes|no) ;; *) cache_clear; return 1 ;; esac
+    now=$(date +%s 2>/dev/null) || { cache_clear; return 1; }
+    age=$((now - cached_time))
+    [ "$age" -ge 0 ] && [ "$age" -le "$CACHE_SECONDS" ] || {
+        cache_clear; return 1
+    }
+    cp "$CACHE_DATABASE" "$WORK/decrypted" 2>/dev/null || {
+        cache_clear; return 1
+    }
+    chmod 600 "$WORK/decrypted" 2>/dev/null || {
+        cache_clear; return 1
+    }
+    DB_WAS_OLD=$cached_old
+    parse_header
+    cp "$WORK/decrypted" "$WORK/database" || {
+        cache_clear; return 1
+    }
+    chmod 600 "$WORK/database" || { cache_clear; return 1; }
+    return 0
+}
+
+cache_write() {
+    expected_signature=$1
+    [ "$CACHE_SECONDS" -gt 0 ] && [ -n "$CACHE_DIR" ] || return 0
+    current_signature=$(cache_signature 2>/dev/null) || return 0
+    [ "$current_signature" = "$expected_signature" ] || return 0
+    now=$(date +%s 2>/dev/null) || return 0
+    cache_tmp_db=$(mktemp "$CACHE_DIR/database.XXXXXX") || return 0
+    if ! cp "$WORK/database" "$cache_tmp_db" ||
+       ! chmod 600 "$cache_tmp_db"; then
+        rm -f "$cache_tmp_db"; return 0
+    fi
+    mv -f "$cache_tmp_db" "$CACHE_DATABASE" || {
+        rm -f "$cache_tmp_db"; return 0
+    }
+    cache_tmp_meta=$(mktemp "$CACHE_DIR/meta.XXXXXX") || return 0
+    if ! printf '%s\n%s\n%s\n' "$expected_signature" "$now" \
+        "$DB_WAS_OLD" > "$cache_tmp_meta" ||
+        ! chmod 600 "$cache_tmp_meta"; then
+        rm -f "$cache_tmp_meta"; cache_clear; return 0
+    fi
+    mv -f "$cache_tmp_meta" "$CACHE_META" || {
+        rm -f "$cache_tmp_meta"; cache_clear; return 0
+    }
+}
+
 has_legacy_records() {
     LC_ALL=C awk '
-    NR == 1 { next }
+    NR == 1 {next}
     {
-        fields = 1
-        escaped = 0
-        for (i = 1; i <= length($0); i++) {
-            c = substr($0, i, 1)
-            if (escaped) escaped = 0
-            else if (c == "\\") escaped = 1
-            else if (c == "|") fields++
+        fields=1; escaped=0
+        for (i=1; i<=length($0); i++) {
+            c=substr($0,i,1)
+            if (escaped) escaped=0
+            else if (c=="\\") escaped=1
+            else if (c=="|") fields++
         }
-        if (fields == 5) old = 1
-        else if (fields != 6) bad = 1
+        if (fields==5) old=1
+        else if (fields!=6) bad=1
     }
     END {
         if (bad) exit 2
         if (old) exit 0
         exit 1
-    }
-    ' "$1"
+    }' "$1"
 }
 
 file_to_var() {
     file_value=$(cat "$1"; printf '.') || die "Cannot read temporary field."
     file_value=${file_value%.}
 }
+
 escape_file() {
     LC_ALL=C awk '
     {
-        if (NR > 1) printf "%s", "\\n"
-        line = $0
-        for (i = 1; i <= length(line); i++) {
-            c = substr(line, i, 1)
-            if (c == "\\")      printf "%s", "\\\\"
-            else if (c == "|")  printf "%s", "\\|"
-            else if (c == "\r") printf "%s", "\\r"
-            else if (c == "\t") printf "%s", "\\t"
-            else                  printf "%s", c
+        if (NR>1) printf "\\n"
+        for (i=1; i<=length($0); i++) {
+            c=substr($0,i,1)
+            if (c=="\\") printf "\\\\"
+            else if (c=="|") printf "\\|"
+            else if (c=="\r") printf "\\r"
+            else if (c=="\t") printf "\\t"
+            else printf "%s",c
         }
-    }
-    ' "$1"
+    }' "$1"
 }
+
 encode_value() {
-    printf '%s' "$1" > "$WORK/value" || die "Cannot prepare field for encoding."
+    printf '%s' "$1" > "$WORK/value" ||
+        die "Cannot prepare field for encoding."
     escape_file "$WORK/value"
 }
+
 decode_record() {
     printf '%s\n' "$1" > "$WORK/record" || die "Cannot prepare record."
-    : > "$WORK/f1"
-    : > "$WORK/f2"
-    : > "$WORK/f3"
-    : > "$WORK/f4"
-    : > "$WORK/f5"
-    : > "$WORK/f6"
+    : > "$WORK/f1"; : > "$WORK/f2"; : > "$WORK/f3"
+    : > "$WORK/f4"; : > "$WORK/f5"; : > "$WORK/f6"
+
     LC_ALL=C awk \
         -v f1="$WORK/f1" -v f2="$WORK/f2" \
         -v f3="$WORK/f3" -v f4="$WORK/f4" \
         -v f5="$WORK/f5" -v f6="$WORK/f6" '
     function put(s) {
-        if (field == 1)      printf "%s", s >> f1
-        else if (field == 2) printf "%s", s >> f2
-        else if (field == 3) printf "%s", s >> f3
-        else if (field == 4) printf "%s", s >> f4
-        else if (field == 5) printf "%s", s >> f5
-        else if (field == 6) printf "%s", s >> f6
-        else bad = 1
+        if (field==1) printf "%s",s >> f1
+        else if (field==2) printf "%s",s >> f2
+        else if (field==3) printf "%s",s >> f3
+        else if (field==4) printf "%s",s >> f4
+        else if (field==5) printf "%s",s >> f5
+        else if (field==6) printf "%s",s >> f6
+        else bad=1
     }
     {
-        field = 1
-        escaped = 0
-        for (i = 1; i <= length($0); i++) {
-            c = substr($0, i, 1)
+        field=1; escaped=0
+        for (i=1; i<=length($0); i++) {
+            c=substr($0,i,1)
             if (escaped) {
-                if (c == "n") put("\n")
-                else if (c == "r") put("\r")
-                else if (c == "t") put("\t")
-                else if (c == "\\" || c == "|") put(c)
-                else {
-                    put("\\")
-                    put(c)
-                }
-                escaped = 0
-            } else if (c == "\\") {
-                escaped = 1
-            } else if (c == "|") {
-                field++
-            } else {
-                put(c)
-            }
+                if (c=="n") put("\n")
+                else if (c=="r") put("\r")
+                else if (c=="t") put("\t")
+                else if (c=="\\" || c=="|") put(c)
+                else {put("\\"); put(c)}
+                escaped=0
+            } else if (c=="\\") escaped=1
+            else if (c=="|") field++
+            else put(c)
         }
-        if (escaped) bad = 1
+        if (escaped) bad=1
     }
     END {
-        close(f1)
-        close(f2)
-        close(f3)
-        close(f4)
-        close(f5)
-        close(f6)
-        if (bad || (field != 5 && field != 6)) exit 1
-        if (field == 5) legacy = 1
-        if (legacy) exit 2
-    }
-    ' "$WORK/record"
+        close(f1); close(f2); close(f3)
+        close(f4); close(f5); close(f6)
+        if (bad || (field!=5 && field!=6)) exit 1
+        if (field==5) exit 2
+    }' "$WORK/record"
     decode_status=$?
     case "$decode_status" in
         0) record_legacy=no ;;
         2) record_legacy=yes ;;
         *) die "Invalid PASSDB record (expected five or six escaped fields)." ;;
     esac
-    file_to_var "$WORK/f1"
-    title=$file_value
-    file_to_var "$WORK/f2"
-    username=$file_value
-    file_to_var "$WORK/f3"
-    password=$file_value
-    file_to_var "$WORK/f4"
-    totp=$file_value
+
+    file_to_var "$WORK/f1"; title=$file_value
+    file_to_var "$WORK/f2"; username=$file_value
+    file_to_var "$WORK/f3"; password=$file_value
+    file_to_var "$WORK/f4"; totp=$file_value
     if [ "$record_legacy" = yes ]; then
-        # Previous PASSDB records stored Notes as field five and had no URL.
         : > "$WORK/url"
         cp "$WORK/f5" "$WORK/notes" || die "Cannot prepare notes field."
     else
         cp "$WORK/f5" "$WORK/url" || die "Cannot prepare URL field."
         cp "$WORK/f6" "$WORK/notes" || die "Cannot prepare notes field."
     fi
-    file_to_var "$WORK/url"
-    url=$file_value
+    file_to_var "$WORK/url"; url=$file_value
 }
 
 append_record() {
     output_file=$1
     {
-        escape_file "$WORK/f1"
-        printf '|'
-        escape_file "$WORK/f2"
-        printf '|'
-        escape_file "$WORK/f3"
-        printf '|'
-        escape_file "$WORK/f4"
-        printf '|'
-        escape_file "$WORK/f5"
-        printf '|'
-        escape_file "$WORK/f6"
-        printf '\n'
+        escape_file "$WORK/f1"; printf '|'
+        escape_file "$WORK/f2"; printf '|'
+        escape_file "$WORK/f3"; printf '|'
+        escape_file "$WORK/f4"; printf '|'
+        escape_file "$WORK/f5"; printf '|'
+        escape_file "$WORK/f6"; printf '\n'
     } >> "$output_file" || die "Cannot write database record."
 }
+
 append_current_record() {
     output_file=$1
     printf '%s' "$title" > "$WORK/f1" || die "Cannot prepare title."
@@ -355,16 +332,20 @@ append_current_record() {
     cp "$WORK/notes" "$WORK/f6" || die "Cannot prepare notes."
     append_record "$output_file"
 }
+
 parse_header() {
     header=$(sed -n '1p' "$WORK/decrypted")
     case "$header" in
         "PASSDB$TAB"*) recipient=${header#PASSDB"$TAB"} ;;
         "PASSDB "*) recipient=${header#PASSDB } ;;
-        "PASSDB1"*|"PASSDB2"*) die "Legacy Base64 database: migrate it with the previous pass script first." ;;
+        "PASSDB1"*|"PASSDB2"*)
+            die "Legacy Base64 database: migrate it with the previous pass script first."
+            ;;
         *) die "Invalid database header." ;;
     esac
     [ -n "$recipient" ] || die "Missing encryption recipient in database."
 }
+
 check_db() {
     [ -f "$DB" ] || die "No database. Run: pass init KEYID"
 }
@@ -376,14 +357,13 @@ decrypt_db() {
     db_signature=
     if [ "$CACHE_SECONDS" -gt 0 ] && [ -n "$CACHE_DIR" ]; then
         db_signature=$(cache_signature) || die "Cannot calculate database checksum."
-        if cache_read "$db_signature"; then
-            return 0
-        fi
+        cache_read "$db_signature" && return 0
     fi
     gpg --quiet --decrypt --output "$WORK/decrypted" "$DB" ||
         die "Unable to decrypt database. Check your GPG private key."
     chmod 600 "$WORK/decrypted" || die "Cannot secure decrypted database."
     parse_header
+
     if has_legacy_records "$WORK/decrypted"; then
         legacy_status=0
     else
@@ -412,6 +392,7 @@ decrypt_db() {
     chmod 600 "$WORK/database" || die "Cannot secure decrypted database."
     cache_write "$db_signature"
 }
+
 has_public_key() {
     gpg --list-keys --with-colons "$1" 2>/dev/null | grep -q '^pub:'
 }
@@ -427,14 +408,21 @@ encrypt_db() {
     NEWDB=$(mktemp "$DB.tmp.XXXXXX") ||
         die "Cannot create encrypted database temporary file."
     chmod 600 "$NEWDB" || die "Cannot secure encrypted temporary file."
-    gpg --quiet --yes --encrypt --recipient "$recipient" \
-        --output "$NEWDB" "$1" || die "GPG encryption failed."
+
+    gpg --quiet --yes \
+        --compress-algo bzip2 \
+        --compress-level 9 \
+        --encrypt --recipient "$recipient" \
+        --output "$NEWDB" "$1" ||
+        die "GPG encryption failed."
+
     chmod 600 "$NEWDB" || die "Cannot set encrypted database permissions."
     mv -f "$NEWDB" "$DB" || die "Unable to replace database."
     NEWDB=
     DB_WAS_OLD=no
     cache_clear
 }
+
 init_db() {
     [ "$#" -eq 1 ] || usage
     [ ! -e "$DB" ] || die "$DB already exists."
@@ -446,6 +434,7 @@ init_db() {
     encrypt_db "$WORK/database"
     printf 'Initialized encrypted database: %s\n' "$DB"
 }
+
 rekey_db() {
     [ "$#" -eq 1 ] || usage
     check_key_pair "$1"
@@ -463,21 +452,14 @@ rekey_db() {
     encrypt_db "$WORK/updated"
     printf 'Database re-encrypted to key: %s\n' "$recipient"
 }
+
 parse_spec() {
     case "$1" in
-        */*)
-            title=${1%%/*}
-            username=${1#*/}
-            ;;
-        *)
-            title=$1
-            username=
-            ;;
+        */*) title=${1%%/*}; username=${1#*/} ;;
+        *) title=$1; username= ;;
     esac
     [ -n "$title" ] || die "Title cannot be empty."
-    case "$title" in
-        */*) die "Title cannot contain /." ;;
-    esac
+    case "$title" in */*) die "Title cannot contain /." ;; esac
 }
 
 record_match_action() {
@@ -488,52 +470,36 @@ record_match_action() {
     printf '%s\n%s\n' "$enc_title" "$enc_user" > "$WORK/key" ||
         die "Cannot prepare search key."
     LC_ALL=C awk -v keyfile="$WORK/key" -v action="$action" '
-    function first_sep(s, start,    i, c, esc) {
-        esc = 0
-        for (i = start; i <= length(s); i++) {
-            c = substr(s, i, 1)
-            if (esc) {
-                esc = 0
-                continue
-            }
-            if (c == "\\") {
-                esc = 1
-                continue
-            }
-            if (c == "|") return i
+    function first_sep(s,start,    i,c,esc) {
+        esc=0
+        for (i=start; i<=length(s); i++) {
+            c=substr(s,i,1)
+            if (esc) {esc=0; continue}
+            if (c=="\\") {esc=1; continue}
+            if (c=="|") return i
         }
-        return length(s) + 1
+        return length(s)+1
     }
     BEGIN {
         getline t < keyfile
         getline u < keyfile
         close(keyfile)
     }
-    NR == 1 {
-        if (action == "remove") print
-        next
-    }
+    NR==1 {if (action=="remove") print; next}
     {
-        p = first_sep($0, 1)
-        a = substr($0, 1, p - 1)
-        q = first_sep($0, p + 1)
-        b = substr($0, p + 1, q - p - 1)
-        matched = (tolower(a) == tolower(t) && tolower(b) == tolower(u))
-        if (action == "find" && matched) {
-            print
-            exit
-        }
-        if (action == "exists" && matched) {
-            found = 1
-            exit
-        }
-        if (action == "remove" && !matched) print
+        p=first_sep($0,1)
+        a=substr($0,1,p-1)
+        q=first_sep($0,p+1)
+        b=substr($0,p+1,q-p-1)
+        matched=(tolower(a)==tolower(t) && tolower(b)==tolower(u))
+        if (action=="find" && matched) {print; exit}
+        if (action=="exists" && matched) {found=1; exit}
+        if (action=="remove" && !matched) print
     }
-    END {
-        if (action == "exists") exit !found
-    }
+    END {if (action=="exists") exit !found}
     ' "$database_file"
 }
+
 find_entry() {
     enc_title=$(encode_value "$title")
     enc_user=$(encode_value "$username")
@@ -549,24 +515,23 @@ remove_record() {
     record_match_action remove "$WORK/database" "$1" "$2" > "$WORK/updated" ||
         die "Cannot update database records."
 }
-
 store_record() {
-    if [ "$#" -gt 0 ]; then
-        key_username=$1
-    else
-        key_username=$username
-    fi
-    enc_title=$(encode_value "$title")
+    key_title=${1-$title}
+    key_username=${2-$username}
+    enc_title=$(encode_value "$key_title")
     enc_user=$(encode_value "$key_username")
     remove_record "$enc_title" "$enc_user"
     append_current_record "$WORK/updated"
     encrypt_db "$WORK/updated"
 }
+
 read_secret() {
     printf '%s' "$1"
     if [ -t 0 ]; then
         ECHO_DISABLED=yes
-        stty -echo 2>/dev/null || { ECHO_DISABLED=no; die "Cannot disable terminal echo."; }
+        stty -echo 2>/dev/null || {
+            ECHO_DISABLED=no; die "Cannot disable terminal echo."
+        }
         IFS= read -r secret
         read_status=$?
         restore_echo
@@ -576,20 +541,16 @@ read_secret() {
     fi
     printf '\n'
 }
+
 ask_yes_no() {
     printf '%s [Y/n]: ' "$1"
     IFS= read -r answer || answer=
-    case "$answer" in
-        n|N|no|NO) return 1 ;;
-        *) return 0 ;;
-    esac
+    case "$answer" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
 }
+
 generate_password() {
     length=25
-    upper=yes
-    lower=yes
-    numbers=yes
-    symbols=yes
+    upper=yes lower=yes numbers=yes symbols=yes
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --length)
@@ -606,21 +567,18 @@ generate_password() {
         esac
         shift
     done
-    case "$length" in
-        ''|*[!0-9]*) die "Invalid password length." ;;
-    esac
+    case "$length" in ''|*[!0-9]*) die "Invalid password length." ;; esac
     [ "${#length}" -le 4 ] || die "Password length is too large (maximum 4096)."
     [ "$length" -gt 0 ] || die "Password length must be positive."
     [ "$length" -le 4096 ] || die "Password length is too large (maximum 4096)."
+
     chars=
     [ "$upper" = yes ] && chars=${chars}A-Z
     [ "$lower" = yes ] && chars=${chars}a-z
     [ "$numbers" = yes ] && chars=${chars}0-9
-    # Pipe is intentionally available; PASSDB escaping protects it at rest.
     [ "$symbols" = yes ] && chars="${chars}!@#\$%&*()_+=:,.?|-"
     [ -n "$chars" ] || die "At least one character set must be enabled."
-    LC_ALL=C tr -dc "$chars" < /dev/urandom |
-        dd bs=1 count="$length" 2>/dev/null
+    LC_ALL=C tr -dc "$chars" < /dev/urandom | dd bs=1 count="$length" 2>/dev/null
     printf '\n'
 }
 
@@ -628,44 +586,29 @@ generate_password_for_add() {
     printf 'Password length [25]: '
     IFS= read -r length || die "Unable to read password length."
     length=${length:-25}
-    upper=yes
-    lower=yes
-    numbers=yes
-    symbols=yes
-    description='uppercase letters, lowercase letters, numbers, and symbols'
-    printf 'This password will contain %s. Is this OK? [Y/n] ' "$description"
+    upper=yes lower=yes numbers=yes symbols=yes
+    printf 'This password will contain uppercase letters, lowercase letters, numbers, and symbols. Is this OK? [Y/n] '
     IFS= read -r answer || answer=
     case "$answer" in
         n|N|no|NO)
             printf '\nCharacter sets you can exclude:\n'
-            printf '  1) Uppercase letters\n'
-            printf '  2) Lowercase letters\n'
-            printf '  3) Numbers\n'
-            printf '  4) Symbols\n'
+            printf '  1) Uppercase letters\n  2) Lowercase letters\n'
+            printf '  3) Numbers\n  4) Symbols\n'
             printf 'Enter exclusions (examples: 12 or 1 2; press Enter for none): '
             IFS= read -r exclusions || exclusions=
-            # Accept compact digits (12), whitespace-separated digits (1 2),
-            # or comma-separated digits (1,2). Every digit is one selection.
             compact=$(printf '%s' "$exclusions" | tr -d " ,$TAB")
-            case "$compact" in
-                *[!1234]*)
-                    die "Invalid exclusion '$exclusions'. Use only 1, 2, 3, or 4."
-                    ;;
-            esac
+            case "$compact" in *[!1234]*) die "Invalid exclusion '$exclusions'. Use only 1, 2, 3, or 4." ;; esac
             index=1
             while [ "$index" -le "${#compact}" ]; do
                 choice=$(printf '%s' "$compact" | cut -c "$index")
                 case "$choice" in
-                    1) upper=no ;;
-                    2) lower=no ;;
-                    3) numbers=no ;;
-                    4) symbols=no ;;
+                    1) upper=no ;; 2) lower=no ;;
+                    3) numbers=no ;; 4) symbols=no ;;
                 esac
-                index=$((index + 1))
+                index=$((index+1))
             done
             ;;
     esac
-    # Build the same options accepted by the public generate command.
     set -- "$length"
     [ "$upper" = no ] && set -- "$@" --no-upper
     [ "$lower" = no ] && set -- "$@" --no-lower
@@ -674,11 +617,10 @@ generate_password_for_add() {
     while :; do
         password=$(generate_password "$@") || die "Password generation failed."
         printf '\nGenerated password:\n%s\n\n' "$password"
-        if ask_yes_no 'Use this password?'; then
-            break
-        fi
+        ask_yes_no 'Use this password?' && break
     done
 }
+
 add_entry() {
     decrypt_db
     printf 'Title: '
@@ -687,14 +629,12 @@ add_entry() {
     case "$title" in */*) die "Title cannot contain /." ;; esac
     printf 'Username: '
     IFS= read -r username || die "Unable to read username."
-    if entry_exists_in "$WORK/database"; then
+    entry_exists_in "$WORK/database" &&
         die "That username already exists under this title."
-    fi
+
     read_secret 'Password (leave blank to generate): '
     password=$secret
-    if [ -z "$password" ]; then
-        generate_password_for_add
-    fi
+    [ -n "$password" ] || generate_password_for_add
     [ -n "$password" ] || die "Password is required."
     read_secret 'TOTP secret (optional): '
     totp=$secret
@@ -709,6 +649,7 @@ add_entry() {
     store_record
     printf 'Entry saved: %s/%s\n' "$title" "$username"
 }
+
 edit_entry() {
     [ "$#" -eq 1 ] || usage
     decrypt_db
@@ -716,38 +657,45 @@ edit_entry() {
     record=$(find_entry)
     [ -n "$record" ] || die "Entry not found."
     decode_record "$record"
+    original_title=$title
     original_username=$username
     {
-        printf 'Username: %s\n' "$username"
-        printf 'Password: %s\n' "$password"
-        printf 'Totp: %s\n' "$totp"
-        printf 'URL: %s\n' "$url"
-        printf 'Notes:\n'
+        printf 'Title: %s\nUsername: %s\nPassword: %s\nTotp: %s\nURL: %s\nNotes:\n' \
+            "$title" "$username" "$password" "$totp" "$url"
         cat "$WORK/notes"
     } > "$WORK/entry" || die "Cannot prepare entry for editing."
     chmod 600 "$WORK/entry" || die "Cannot secure editor file."
     "$EDITOR_CMD" "$WORK/entry" || die "Editor failed."
-    grep -q '^Username: ' "$WORK/entry" || die "Missing Username field."
-    grep -q '^Password: ' "$WORK/entry" || die "Missing Password field."
-    grep -q '^Totp: ' "$WORK/entry" || die "Missing Totp field."
-    grep -q '^URL: ' "$WORK/entry" || die "Missing URL field."
+
+    for field in Title Username Password Totp URL; do
+        grep -q "^$field: " "$WORK/entry" || die "Missing $field field."
+    done
     grep -q '^Notes:$' "$WORK/entry" || die "Missing Notes field."
-    new_username=$(sed -n '1s/^Username: //p' "$WORK/entry")
-    password=$(sed -n '2s/^Password: //p' "$WORK/entry")
-    totp=$(sed -n '3s/^Totp: //p' "$WORK/entry")
-    url=$(sed -n '4s/^URL: //p' "$WORK/entry")
-    sed '1,5d' "$WORK/entry" > "$WORK/notes" ||
+    title=$(sed -n '1s/^Title: //p' "$WORK/entry")
+    username=$(sed -n '2s/^Username: //p' "$WORK/entry")
+    password=$(sed -n '3s/^Password: //p' "$WORK/entry")
+    totp=$(sed -n '4s/^Totp: //p' "$WORK/entry")
+    url=$(sed -n '5s/^URL: //p' "$WORK/entry")
+    sed '1,6d' "$WORK/entry" > "$WORK/notes" ||
         die "Cannot read edited notes."
+
+    [ -n "$title" ] || die "Title cannot be empty."
+    case "$title" in */*) die "Title cannot contain /. " ;; esac
     [ -n "$password" ] || die "Password cannot be empty."
-    username=$new_username
-    if [ "$(encode_value "$username")" != "$(encode_value "$original_username")" ]; then
-        if entry_exists_in "$WORK/database"; then
-            die "That username already exists under this title."
-        fi
+
+    # Exclude the original record before checking the new title/username key.
+    remove_record "$(encode_value "$original_title")" \
+        "$(encode_value "$original_username")"
+    mv "$WORK/updated" "$WORK/without-old" ||
+        die "Cannot prepare database for duplicate checking."
+    if entry_exists_in "$WORK/without-old"; then
+        die "That username already exists under this title."
     fi
-    store_record "$original_username"
+
+    store_record "$original_title" "$original_username"
     printf 'Entry updated: %s/%s\n' "$title" "$username"
 }
+
 show_entry() {
     [ "$#" -eq 1 ] || usage
     decrypt_db
@@ -755,27 +703,80 @@ show_entry() {
     record=$(find_entry)
     [ -n "$record" ] || die "Entry not found."
     decode_record "$record"
-    printf 'Title: %s\n' "$title"
-    printf 'Username: %s\n' "$username"
-    printf 'Password: %s\n' "$password"
-    printf 'Totp: %s\n' "$totp"
-    printf 'URL: %s\n' "$url"
-    printf 'Notes:\n'
+    printf 'Title: %s\nUsername: %s\nPassword: %s\nTotp: %s\nURL: %s\nNotes:\n' \
+        "$title" "$username" "$password" "$totp" "$url"
     cat "$WORK/notes"
     printf '\n'
 }
 
-copy_clipboard() {
+schedule_clipboard_clear() {
+    clip_source=$1
+    clip_backend=$2
+    clip_timeout=${PASS_TIMEOUT:-15}
+    case "$clip_timeout" in
+        off|OFF|0) return 0 ;;
+        ''|*[!0-9]*) clip_timeout=15 ;;
+    esac
+    [ "$clip_timeout" -gt 0 ] || return 0
+    if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+        clip_base=/dev/shm
+    else
+        clip_base=${TMPDIR:-/tmp}
+    fi
+    clip_expected=$(mktemp "$clip_base/pass-clipboard.XXXXXX") || return 0
+    clip_current=$clip_expected.current
+    if ! cp "$clip_source" "$clip_expected" || ! chmod 600 "$clip_expected"; then
+        rm -f "$clip_expected"; return 0
+    fi
+    : > "$clip_current" || { rm -f "$clip_expected"; return 0; }
+    chmod 600 "$clip_current" 2>/dev/null || :
+
+    # Clear only if the clipboard still contains this command's copied value.
+    nohup sh -c '
+        delay=$1; backend=$2; expected=$3; current=$4
+        trap "rm -f \"\$expected\" \"\$current\"" 0 HUP INT TERM
+        sleep "$delay" || exit 0
+        case "$backend" in
+            wl) command -v wl-paste >/dev/null 2>&1 || exit 0
+                wl-paste --no-newline > "$current" 2>/dev/null || exit 0 ;;
+            xclip) command -v xclip >/dev/null 2>&1 || exit 0
+                   xclip -selection clipboard -o > "$current" 2>/dev/null || exit 0 ;;
+            xsel) command -v xsel >/dev/null 2>&1 || exit 0
+                  xsel --clipboard --output > "$current" 2>/dev/null || exit 0 ;;
+            *) exit 0 ;;
+        esac
+        if cmp -s "$expected" "$current"; then
+            case "$backend" in
+                wl) printf "" | wl-copy 2>/dev/null ;;
+                xclip) printf "" | xclip -selection clipboard -i 2>/dev/null ;;
+                xsel) printf "" | xsel --clipboard --input 2>/dev/null ;;
+            esac
+        fi
+    ' sh "$clip_timeout" "$clip_backend" "$clip_expected" "$clip_current" \
+        </dev/null >/dev/null 2>&1 &
+}
+
+copy_clipboard_file() {
     if command -v wl-copy >/dev/null 2>&1; then
-        printf '%s' "$1" | wl-copy || die "Clipboard copy failed."
+        wl-copy < "$1" || die "Clipboard copy failed."
+        schedule_clipboard_clear "$1" wl
     elif command -v xclip >/dev/null 2>&1; then
-        printf '%s' "$1" | xclip -selection clipboard || die "Clipboard copy failed."
+        xclip -selection clipboard < "$1" || die "Clipboard copy failed."
+        schedule_clipboard_clear "$1" xclip
     elif command -v xsel >/dev/null 2>&1; then
-        printf '%s' "$1" | xsel --clipboard --input || die "Clipboard copy failed."
+        xsel --clipboard --input < "$1" || die "Clipboard copy failed."
+        schedule_clipboard_clear "$1" xsel
     else
         die "Install wl-clipboard, xclip, or xsel for clipboard support."
     fi
 }
+
+copy_clipboard() {
+    printf '%s' "$1" > "$WORK/clipboard" ||
+        die "Cannot prepare clipboard data."
+    copy_clipboard_file "$WORK/clipboard"
+}
+
 copy_entry() {
     copy_field=password
     spec=
@@ -786,141 +787,61 @@ copy_entry() {
             -n|--notes) copy_field=notes ;;
             -l|--url) copy_field=url ;;
             --*) die "Unknown copy option: $1" ;;
-            *)
-                [ -z "$spec" ] || die "Only one entry may be specified."
-                spec=$1
-                ;;
+            *) [ -z "$spec" ] || die "Only one entry may be specified."
+               spec=$1 ;;
         esac
         shift
     done
-    [ -n "$spec" ] || die "Usage: pass copy [--username|-u|--password|-p|--notes|-n|--url|-l] TITLE/USERNAME"
+    [ -n "$spec" ] ||
+        die "Usage: pass copy [--username|-u|--password|-p|--notes|-n|--url|-l] TITLE/USERNAME"
     decrypt_db
     parse_spec "$spec"
     record=$(find_entry)
     [ -n "$record" ] || die "Entry not found."
     decode_record "$record"
     case "$copy_field" in
-        username) copy_file="$WORK/f2" ;;
-        password) copy_file="$WORK/f3" ;;
-        url) copy_file="$WORK/url" ;;
-        notes) copy_file="$WORK/notes" ;;
+        username) copy_file=$WORK/f2 ;;
+        password) copy_file=$WORK/f3 ;;
+        url) copy_file=$WORK/url ;;
+        notes) copy_file=$WORK/notes ;;
     esac
     copy_clipboard_file "$copy_file"
     printf '%s copied to clipboard.\n' "$copy_field"
 }
-copy_clipboard_file() {
-    if command -v wl-copy >/dev/null 2>&1; then
-        wl-copy < "$1" || die "Clipboard copy failed."
-    elif command -v xclip >/dev/null 2>&1; then
-        xclip -selection clipboard < "$1" || die "Clipboard copy failed."
-    elif command -v xsel >/dev/null 2>&1; then
-        xsel --clipboard --input < "$1" || die "Clipboard copy failed."
-    else
-        die "Install wl-clipboard, xclip, or xsel for clipboard support."
-    fi
-}
+
 print_identifiers() {
     output_mode=$1
     LC_ALL=C awk -v mode="$output_mode" '
-    NR == 1 { next }
+    NR==1 {next}
     {
-        field = 1
-        escaped = 0
-        first = ""
-        second = ""
-        for (i = 1; i <= length($0) && field <= 2; i++) {
-            c = substr($0, i, 1)
+        field=1; escaped=0; first=""; second=""
+        for (i=1; i<=length($0) && field<=2; i++) {
+            c=substr($0,i,1)
             if (escaped) {
-                if (c == "n") value = "\n"
-                else if (c == "r") value = "\r"
-                else if (c == "t") value = "\t"
-                else if (c == "\\" || c == "|") value = c
-                else value = "\\" c
-                if (field == 1) first = first value
-                else second = second value
-                escaped = 0
-            } else if (c == "\\") {
-                escaped = 1
-            } else if (c == "|") {
-                field++
-            } else {
-                if (field == 1) first = first c
-                else second = second c
-            }
+                if (c=="n") value="\n"
+                else if (c=="r") value="\r"
+                else if (c=="t") value="\t"
+                else if (c=="\\" || c=="|") value=c
+                else value="\\" c
+                if (field==1) first=first value
+                else second=second value
+                escaped=0
+            } else if (c=="\\") escaped=1
+            else if (c=="|") field++
+            else if (field==1) first=first c
+            else second=second c
         }
-        if (mode == "list") printf "%-30s %s\n", first, second
-        else printf "%s/%s\n", first, second
-    }
-    ' "$WORK/database"
+        if (mode=="list") printf "%-30s %s\n",first,second
+        else printf "%s/%s\n",first,second
+    }' "$WORK/database"
 }
 
 list_entries() {
     decrypt_db
-    printf '%-30s %s\n' TITLE USERNAME
-    printf '%-30s %s\n' '-----' '--------'
+    printf '%-30s %s\n%-30s %s\n' TITLE USERNAME '-----' '--------'
     print_identifiers list
 }
-# Completion returns titles first, then usernames for the selected title.
-# It may unlock the database; GPG pinentry is directed to the active terminal.
-print_completion_candidates() {
-    completion_mode=$1
-    completion_title=${2-}
-    printf '%s' "$completion_title" > "$WORK/completion-title"
-    LC_ALL=C awk -v mode="$completion_mode" -v title_file="$WORK/completion-title" '
-    BEGIN {
-        if (mode == "users") {
-            getline wanted < title_file
-            close(title_file)
-            wanted = tolower(wanted)
-        }
-    }
-    NR == 1 { next }
-    {
-        field = 1
-        escaped = 0
-        first = second = ""
-        for (i = 1; i <= length($0) && field <= 2; i++) {
-            c = substr($0, i, 1)
-            if (escaped) {
-                if (c == "n") value = "\n"
-                else if (c == "r") value = "\r"
-                else if (c == "t") value = "\t"
-                else if (c == "\\" || c == "|") value = c
-                else value = "\\" c
-                if (field == 1) first = first value
-                else second = second value
-                escaped = 0
-            } else if (c == "\\") escaped = 1
-            else if (c == "|") field++
-            else if (field == 1) first = first c
-            else if (field == 2) second = second c
-        }
-        if (mode == "titles" && first != "" && !(first in seen_title)) {
-            seen_title[first] = 1
-            print first
-        } else if (mode == "users" && tolower(first) == wanted && second != "" && !(second in seen_user)) {
-            seen_user[second] = 1
-            print second
-        }
-    }
-    ' "$WORK/database"
-}
 
-completion_entries() {
-    case ${1-} in
-        titles) [ "$#" -eq 1 ] || return 1; completion_mode=titles; completion_title= ;;
-        users) [ "$#" -eq 2 ] || return 1; completion_mode=users; completion_title=$2 ;;
-        *) return 1 ;;
-    esac
-    if [ -r /dev/tty ]; then
-        current_tty=$(tty 2>/dev/null < /dev/tty) && {
-            GPG_TTY=$current_tty
-            export GPG_TTY
-        }
-    fi
-    decrypt_db || return 0
-    print_completion_candidates "$completion_mode" "$completion_title"
-}
 delete_entry() {
     [ "$#" -eq 1 ] || usage
     decrypt_db
@@ -937,6 +858,7 @@ delete_entry() {
     encrypt_db "$WORK/updated"
     printf 'Entry deleted.\n'
 }
+
 otp_entry() {
     [ "$#" -eq 1 ] || usage
     decrypt_db
@@ -945,8 +867,9 @@ otp_entry() {
     [ -n "$record" ] || die "Entry not found."
     decode_record "$record"
     [ -n "$totp" ] || die "No TOTP secret stored."
-    [ -x ./totp ] || die "./totp not found or not executable."
-    code=$(./totp "$totp") || die "TOTP generation failed."
+    [ -x "$PASS_DIR/totp" ] ||
+        die "TOTP helper not found or not executable: $PASS_DIR/totp"
+    code=$("$PASS_DIR/totp" "$totp") || die "TOTP generation failed."
     [ -n "$code" ] || die "No TOTP code generated."
     copy_clipboard "$code"
     printf 'TOTP copied to clipboard.\n'
@@ -968,6 +891,7 @@ otp_add() {
     store_record
     printf 'TOTP secret saved.\n'
 }
+
 otp_remove() {
     [ "$#" -eq 1 ] || usage
     decrypt_db
@@ -981,6 +905,7 @@ otp_remove() {
     store_record
     printf 'TOTP secret removed.\n'
 }
+
 qr_entry() {
     [ "$#" -eq 1 ] || usage
     decrypt_db
@@ -988,9 +913,11 @@ qr_entry() {
     record=$(find_entry)
     [ -n "$record" ] || die "Entry not found."
     decode_record "$record"
-    [ -x ./qr ] || die "./qr not found or not executable."
-    ./qr "$password"
+    [ -x "$PASS_DIR/qr" ] ||
+        die "QR helper not found or not executable: $PASS_DIR/qr"
+    "$PASS_DIR/qr" "$password"
 }
+
 command_name=${1:-}
 [ "$#" -gt 0 ] && shift
 case "$command_name" in
@@ -1005,17 +932,10 @@ case "$command_name" in
     delete) delete_entry "$@" ;;
     qr) qr_entry "$@" ;;
     generate|gen) generate_password "$@" ;;
-    __complete) completion_entries "$@" ;;
     otp)
         case "${1:-}" in
-            add)
-                shift
-                otp_add "$@"
-                ;;
-            remove)
-                shift
-                otp_remove "$@"
-                ;;
+            add) shift; otp_add "$@" ;;
+            remove) shift; otp_remove "$@" ;;
             *) otp_entry "$@" ;;
         esac
         ;;
