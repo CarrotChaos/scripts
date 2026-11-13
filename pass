@@ -12,12 +12,12 @@ esac
 PASS_DIR=$(CDPATH= cd -P "$(dirname "$PASS_SCRIPT")" 2>/dev/null && pwd) ||
     PASS_DIR=.
 
-DB=$HOME/passwords.gpg
+DB=${PASS_DB:-$HOME/passwords.gpg}
 TAB=$(printf '\t')
 EDITOR_CMD=${VISUAL:-${EDITOR:-vi}}
 WORK= NEWDB= DB_WAS_OLD=no
-CACHE_SECONDS=${PASS_CACHE_SECONDS:-60}
-CACHE_DIR= CACHE_DATABASE= CACHE_META=
+CACHE_SECONDS=300
+CACHE_DIR= CACHE_DATABASE= CACHE_STATE= CACHE_CLEANER_PID=
 ECHO_DISABLED=no
 
 restore_echo() {
@@ -35,17 +35,73 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 trap cleanup 0
 trap 'exit 1' HUP INT TERM
 
+# Tell gpg-agent which terminal should receive pinentry prompts.
+prepare_pinentry() {
+    if [ -n "${GPG_TTY:-}" ]; then
+        export GPG_TTY
+    else
+        GPG_TTY=$(sh -c 'tty < /dev/tty' 2>/dev/null) || GPG_TTY=
+        [ -z "$GPG_TTY" ] || export GPG_TTY
+    fi
+    if command -v gpg-connect-agent >/dev/null 2>&1; then
+        printf 'updatestartuptty\n/bye\n' |
+            gpg-connect-agent --quiet >/dev/null 2>&1 || :
+    fi
+}
+
+agent_clear_passphrase() {
+    command -v gpg-connect-agent >/dev/null 2>&1 || return 0
+    printf 'CLEAR_PASSPHRASE pass:master\n/bye\n' |
+        gpg-connect-agent --quiet >/dev/null 2>&1 || :
+}
+
+prompt_master_password() {
+    prompt_mode=$1
+    case "$prompt_mode" in
+        new)
+            agent_clear_passphrase
+            agent_command='GET_PASSPHRASE --data --repeat=1 pass:master X Enter+new+database+password X'
+            ;;
+        retry)
+            agent_command='GET_PASSPHRASE --data pass:master Incorrect+database+password Enter+database+password X'
+            ;;
+        *)
+            agent_command='GET_PASSPHRASE --data pass:master X Enter+database+password X'
+            ;;
+    esac
+    prepare_pinentry
+    pass_tmp=$(mktemp "$WORK/passphrase.XXXXXX") ||
+        die "Cannot create RAM passphrase file."
+    if ! {
+        printf '%s\n' "$agent_command"
+        printf '/bye\n'
+    } | gpg-connect-agent --quiet --decode 2>/dev/null |
+        sed -n 's/^D //p' > "$pass_tmp"; then
+        rm -f "$pass_tmp"
+        die "Pinentry failed while requesting the database password."
+    fi
+    [ -s "$pass_tmp" ] || {
+        rm -f "$pass_tmp"
+        die "Pinentry was cancelled or returned an empty database password."
+    }
+    chmod 600 "$pass_tmp" || die "Cannot secure RAM passphrase file."
+    mv -f "$pass_tmp" "$WORK/passphrase" ||
+        die "Cannot install RAM passphrase file."
+    chmod 600 "$WORK/passphrase" || die "Cannot secure database passphrase."
+    cache_touch
+}
+
 usage() {
     cat <<'EOF'
 Usage:
-  pass init KEYID_OR_EMAIL
-  pass rekey KEYID_OR_EMAIL
-  pass lock
+  pass init
+  pass open
+  pass close
+  pass rekey
   pass add
   pass edit TITLE[/USERNAME]
-  pass show TITLE[/USERNAME]
+  pass show [TITLE/USERNAME]
   pass copy [--username|-u | --password|-p | --notes|-n | --url|-l] TITLE/USERNAME
-  pass list
   pass delete TITLE/USERNAME
   pass otp TITLE/USERNAME
   pass otp add TITLE/USERNAME
@@ -61,7 +117,7 @@ Generate options:
   --no-symbols
 
 Examples:
-  pass init YOUR_GPG_KEY_ID
+  pass init
   pass add
   pass show GitHub/myuser
   pass copy GitHub/myuser
@@ -74,132 +130,222 @@ Examples:
   pass otp remove GitHub/myuser
   pass qr GitHub/myuser
   pass generate 32 --no-symbols
-  pass rekey NEW_GPG_KEY_ID
-  pass lock
+  pass rekey
+  pass open
+  pass close
 EOF
     exit 1
 }
 
 make_work() {
     [ -n "$WORK" ] && return 0
-    if [ -d /dev/shm ] && [ -w /dev/shm ]; then
-        work_base=/dev/shm
-    else
-        work_base=${TMPDIR:-/tmp}
-    fi
-    WORK=$(mktemp -d "$work_base/pass.XXXXXX") ||
-        die "Cannot create temporary directory."
+    [ -d /dev/shm ] && [ -w /dev/shm ] ||
+        die "/dev/shm is not available or writable."
+    WORK=$(mktemp -d /dev/shm/pass.XXXXXX) ||
+        die "Cannot create temporary directory in /dev/shm."
     chmod 700 "$WORK" || die "Cannot secure temporary directory."
 }
 
 cache_init() {
-    case "$CACHE_SECONDS" in
-        ''|*[!0-9]*) CACHE_SECONDS=60 ;;
-    esac
-    if [ -n "${XDG_RUNTIME_DIR:-}" ] &&
-       [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
-        cache_base=$XDG_RUNTIME_DIR
-    elif [ -d /dev/shm ] && [ -w /dev/shm ]; then
-        cache_base=/dev/shm
-    else
-        return 0
+    [ -d /dev/shm ] && [ -w /dev/shm ] ||
+        die "/dev/shm is not available or writable."
+    [ -r "$PASS_DIR/pass-cache-cleaner" ] ||
+        die "Cache helper not found: $PASS_DIR/pass-cache-cleaner"
+    cache_uid=$(id -u 2>/dev/null) || die "Cannot determine user ID."
+
+    # Remove a cache from the former lock-directory/last-used timer design.
+    if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ "$XDG_RUNTIME_DIR" != /dev/shm ]; then
+        old_cache=$XDG_RUNTIME_DIR/pass-cache-$cache_uid
+        if [ -d "$old_cache" ]; then
+            old_info=$(ls -ldn "$old_cache" 2>/dev/null) || old_info=
+            old_kind=$(printf '%s\n' "$old_info" | cut -c1)
+            old_owner=$(printf '%s\n' "$old_info" | awk '{print $3}')
+            if [ "$old_kind" = d ] && [ "$old_owner" = "$cache_uid" ]; then
+                rm -f "$old_cache/database" "$old_cache/meta" \
+                    "$old_cache/passphrase" "$old_cache/last-used" 2>/dev/null || :
+                rmdir "$old_cache" 2>/dev/null || :
+            fi
+        fi
     fi
-    cache_uid=$(id -u 2>/dev/null) || return 0
-    CACHE_DIR=$cache_base/pass-cache-$cache_uid
+
+    CACHE_DIR=/dev/shm/pass-cache-$cache_uid
     if [ ! -d "$CACHE_DIR" ]; then
-        (umask 077 && mkdir "$CACHE_DIR") 2>/dev/null || {
-            CACHE_DIR=; return 0
-        }
+        (umask 077 && mkdir "$CACHE_DIR") 2>/dev/null ||
+            die "Cannot create RAM cache directory."
     fi
-    cache_info=$(ls -ldn "$CACHE_DIR" 2>/dev/null) || {
-        CACHE_DIR=; return 0
-    }
+    cache_info=$(ls -ldn "$CACHE_DIR" 2>/dev/null) ||
+        die "Cannot inspect RAM cache directory."
     cache_kind=$(printf '%s\n' "$cache_info" | cut -c1)
     cache_owner=$(printf '%s\n' "$cache_info" | awk '{print $3}')
     if [ "$cache_kind" != d ] || [ "$cache_owner" != "$cache_uid" ]; then
-        CACHE_DIR=; return 0
+        die "RAM cache directory is not owned by the current user."
     fi
-    chmod 700 "$CACHE_DIR" 2>/dev/null || {
-        CACHE_DIR=; return 0
-    }
+    chmod 700 "$CACHE_DIR" 2>/dev/null ||
+        die "Cannot secure RAM cache directory."
+
     CACHE_DATABASE=$CACHE_DIR/database
-    CACHE_META=$CACHE_DIR/meta
+    CACHE_STATE=$CACHE_DIR/state
+    CACHE_CLEANER_PID=$CACHE_DIR/cleaner.pid
+
+    # Stop any cleaner left by the previous implementation.
+    if [ -f "$CACHE_DIR/cleaner.lock/pid" ]; then
+        old_cleaner_pid=$(cat "$CACHE_DIR/cleaner.lock/pid" 2>/dev/null)
+        case "$old_cleaner_pid" in
+            ''|*[!0-9]*) ;;
+            *) kill "$old_cleaner_pid" 2>/dev/null || : ;;
+        esac
+    fi
+    rm -rf "$CACHE_DIR/cleaner.lock" 2>/dev/null || :
+    # Retire the former separate meta/passphrase/last-used files.
+    rm -f "$CACHE_DIR/meta" "$CACHE_DIR/passphrase" \
+        "$CACHE_DIR/last-used" 2>/dev/null || :
+}
+cache_clear() {
+    [ -z "$CACHE_DIR" ] && return 0
+
+    if [ -f "$CACHE_CLEANER_PID" ]; then
+        cleaner_pid=$(cat "$CACHE_CLEANER_PID" 2>/dev/null)
+        case "$cleaner_pid" in
+            ''|*[!0-9]*) ;;
+            *) kill "$cleaner_pid" 2>/dev/null || : ;;
+        esac
+    fi
+
+    rm -f "$CACHE_DATABASE" "$CACHE_STATE" "$CACHE_CLEANER_PID" \
+        "$CACHE_DIR"/database.* "$CACHE_DIR"/state.* \
+        "$CACHE_DIR/meta" "$CACHE_DIR/passphrase" \
+        "$CACHE_DIR"/meta.* "$CACHE_DIR"/passphrase.* \
+        "$CACHE_DIR/last-used" 2>/dev/null || :
+    rm -rf "$CACHE_DIR/cleaner.lock" 2>/dev/null || :
+    agent_clear_passphrase
 }
 
-cache_clear() {
-    [ -z "$CACHE_DIR" ] ||
-        rm -f "$CACHE_DATABASE" "$CACHE_META" 2>/dev/null || :
-}
 cache_signature() {
     cksum < "$DB" | awk '{print $1 ":" $2}'
 }
-lock_cache() {
+
+start_cache_cleaner() {
+    [ -n "$CACHE_DIR" ] || return 0
+
+    # Every active use replaces the previous one-shot timer.
+    if [ -f "$CACHE_CLEANER_PID" ]; then
+        cleaner_pid=$(cat "$CACHE_CLEANER_PID" 2>/dev/null)
+        case "$cleaner_pid" in
+            ''|*[!0-9]*) ;;
+            *) kill "$cleaner_pid" 2>/dev/null || : ;;
+        esac
+    fi
+    rm -f "$CACHE_CLEANER_PID" 2>/dev/null || :
+
+    nohup sh "$PASS_DIR/pass-cache-cleaner" "$CACHE_DIR" \
+        "$CACHE_SECONDS" </dev/null >/dev/null 2>&1 &
+    cleaner_pid=$!
+    if ! printf '%s\n' "$cleaner_pid" > "$CACHE_CLEANER_PID"; then
+        kill "$cleaner_pid" 2>/dev/null || :
+        rm -f "$CACHE_CLEANER_PID" 2>/dev/null || :
+        return 0
+    fi
+    chmod 600 "$CACHE_CLEANER_PID" 2>/dev/null || :
+}
+
+cache_touch() {
+    [ -n "$CACHE_DIR" ] || return 0
+    start_cache_cleaner
+}
+
+close_cache() {
     cache_init
     cache_clear
-    printf 'Decrypted RAM cache cleared.\n'
+    rmdir "$CACHE_DIR" 2>/dev/null || :
+    printf 'RAM cache cleared.\n'
 }
-
 cache_read() {
     expected_signature=$1
-    [ "$CACHE_SECONDS" -gt 0 ] && [ -n "$CACHE_DIR" ] || return 1
-    if [ ! -f "$CACHE_DATABASE" ] || [ ! -f "$CACHE_META" ]; then
-        cache_clear; return 1
+
+    # The cleaner PID is the cache's idle-time lease.
+    if [ ! -s "$CACHE_STATE" ] || [ ! -s "$CACHE_CLEANER_PID" ]; then
+        cache_clear
+        return 1
     fi
-    {
-        IFS= read -r cached_signature || { cache_clear; return 1; }
-        IFS= read -r cached_time || { cache_clear; return 1; }
-        IFS= read -r cached_old || { cache_clear; return 1; }
-    } < "$CACHE_META"
-    [ "$cached_signature" = "$expected_signature" ] || {
-        cache_clear; return 1
+    IFS= read -r cleaner_pid < "$CACHE_CLEANER_PID" || {
+        cache_clear
+        return 1
     }
-    case "$cached_time" in ''|*[!0-9]*) cache_clear; return 1 ;; esac
-    case "$cached_old" in yes|no) ;; *) cache_clear; return 1 ;; esac
-    now=$(date +%s 2>/dev/null) || { cache_clear; return 1; }
-    age=$((now - cached_time))
-    [ "$age" -ge 0 ] && [ "$age" -le "$CACHE_SECONDS" ] || {
-        cache_clear; return 1
+    case "$cleaner_pid" in
+        ''|*[!0-9]*) cache_clear; return 1 ;;
+    esac
+    kill -0 "$cleaner_pid" 2>/dev/null || {
+        cache_clear
+        return 1
     }
-    cp "$CACHE_DATABASE" "$WORK/decrypted" 2>/dev/null || {
-        cache_clear; return 1
+
+    [ -f "$CACHE_DATABASE" ] || {
+        cache_clear
+        return 1
     }
-    chmod 600 "$WORK/decrypted" 2>/dev/null || {
-        cache_clear; return 1
+    IFS= read -r cached_signature < "$CACHE_STATE" || {
+        cache_clear
+        return 1
     }
-    DB_WAS_OLD=$cached_old
+    # The first line of state is the encrypted-database checksum; the rest
+    # is the cached symmetric passphrase. Keep the passphrase available when
+    # the DB checksum changed so decrypt_db can try it before prompting again.
+    sed '1d' "$CACHE_STATE" > "$WORK/passphrase" 2>/dev/null || return 1
+    [ -s "$WORK/passphrase" ] || {
+        cache_clear
+        return 1
+    }
+    chmod 600 "$WORK/passphrase" 2>/dev/null || {
+        cache_clear
+        return 1
+    }
+    [ "$cached_signature" = "$expected_signature" ] || return 1
+    cp "$CACHE_DATABASE" "$WORK/decrypted" 2>/dev/null || return 1
+    chmod 600 "$WORK/decrypted" 2>/dev/null || return 1
+    DB_WAS_OLD=no
     parse_header
-    cp "$WORK/decrypted" "$WORK/database" || {
-        cache_clear; return 1
-    }
-    chmod 600 "$WORK/database" || { cache_clear; return 1; }
+    cp "$WORK/decrypted" "$WORK/database" || return 1
+    chmod 600 "$WORK/database" || return 1
+
+    # The cache is valid and has just been used; restart the idle timer.
+    cache_touch
     return 0
 }
-
 cache_write() {
     expected_signature=$1
-    [ "$CACHE_SECONDS" -gt 0 ] && [ -n "$CACHE_DIR" ] || return 0
+    [ -n "$CACHE_DIR" ] || return 0
+    [ -f "$WORK/database" ] && [ -s "$WORK/passphrase" ] || return 0
     current_signature=$(cache_signature 2>/dev/null) || return 0
     [ "$current_signature" = "$expected_signature" ] || return 0
-    now=$(date +%s 2>/dev/null) || return 0
+
     cache_tmp_db=$(mktemp "$CACHE_DIR/database.XXXXXX") || return 0
     if ! cp "$WORK/database" "$cache_tmp_db" ||
        ! chmod 600 "$cache_tmp_db"; then
-        rm -f "$cache_tmp_db"; return 0
+        rm -f "$cache_tmp_db"
+        return 0
     fi
     mv -f "$cache_tmp_db" "$CACHE_DATABASE" || {
-        rm -f "$cache_tmp_db"; return 0
+        rm -f "$cache_tmp_db"
+        return 0
     }
-    cache_tmp_meta=$(mktemp "$CACHE_DIR/meta.XXXXXX") || return 0
-    if ! printf '%s\n%s\n%s\n' "$expected_signature" "$now" \
-        "$DB_WAS_OLD" > "$cache_tmp_meta" ||
-        ! chmod 600 "$cache_tmp_meta"; then
-        rm -f "$cache_tmp_meta"; cache_clear; return 0
-    fi
-    mv -f "$cache_tmp_meta" "$CACHE_META" || {
-        rm -f "$cache_tmp_meta"; cache_clear; return 0
-    }
-}
 
+    # Store the DB signature and passphrase together to avoid a separate meta file.
+    cache_tmp_state=$(mktemp "$CACHE_DIR/state.XXXXXX") || return 0
+    if ! {
+        printf '%s\n' "$expected_signature"
+        cat "$WORK/passphrase"
+    } > "$cache_tmp_state" || ! chmod 600 "$cache_tmp_state"; then
+        rm -f "$cache_tmp_state"
+        cache_clear
+        return 0
+    fi
+    mv -f "$cache_tmp_state" "$CACHE_STATE" || {
+        rm -f "$cache_tmp_state"
+        cache_clear
+        return 0
+    }
+    cache_touch
+}
 has_legacy_records() {
     LC_ALL=C awk '
     NR == 1 {next}
@@ -343,24 +489,34 @@ parse_header() {
             ;;
         *) die "Invalid database header." ;;
     esac
-    [ -n "$recipient" ] || die "Missing encryption recipient in database."
 }
 
 check_db() {
-    [ -f "$DB" ] || die "No database. Run: pass init KEYID"
+    [ -f "$DB" ] || die "No database. Run: pass init"
 }
 
 decrypt_db() {
     check_db
     make_work
     cache_init
-    db_signature=
-    if [ "$CACHE_SECONDS" -gt 0 ] && [ -n "$CACHE_DIR" ]; then
-        db_signature=$(cache_signature) || die "Cannot calculate database checksum."
-        cache_read "$db_signature" && return 0
-    fi
-    gpg --quiet --decrypt --output "$WORK/decrypted" "$DB" ||
-        die "Unable to decrypt database. Check your GPG private key."
+    db_signature=$(cache_signature) || die "Cannot calculate database checksum."
+    cache_read "$db_signature" && return 0
+
+    attempt=1
+    while :; do
+        [ -s "$WORK/passphrase" ] || prompt_master_password unlock
+        if gpg --batch --quiet --pinentry-mode loopback \
+            --passphrase-file "$WORK/passphrase" \
+            --decrypt --output "$WORK/decrypted" "$DB"; then
+            break
+        fi
+        rm -f "$WORK/decrypted" "$WORK/passphrase"
+        cache_clear
+        attempt=$((attempt + 1))
+        [ "$attempt" -le 3 ] ||
+            die "Unable to decrypt database after three password attempts."
+        prompt_master_password retry
+    done
     chmod 600 "$WORK/decrypted" || die "Cannot secure decrypted database."
     parse_header
 
@@ -389,68 +545,74 @@ decrypt_db() {
             ;;
         *) die "Invalid PASSDB record format." ;;
     esac
-    chmod 600 "$WORK/database" || die "Cannot secure decrypted database."
+    chmod 600 "$WORK/database" || die "Cannot secure database."
     cache_write "$db_signature"
 }
 
-has_public_key() {
-    gpg --list-keys --with-colons "$1" 2>/dev/null | grep -q '^pub:'
-}
-has_secret_key() {
-    gpg --list-secret-keys --with-colons "$1" 2>/dev/null | grep -q '^sec:'
-}
-check_key_pair() {
-    has_public_key "$1" || die "GPG public key not found: $1"
-    has_secret_key "$1" || die "No corresponding GPG private key found: $1"
-}
-
 encrypt_db() {
+    [ -s "$WORK/passphrase" ] ||
+        die "Database password is not available. Unlock the database again."
     NEWDB=$(mktemp "$DB.tmp.XXXXXX") ||
         die "Cannot create encrypted database temporary file."
     chmod 600 "$NEWDB" || die "Cannot secure encrypted temporary file."
 
-    gpg --quiet --yes \
+    if ! gpg --batch --quiet --yes --pinentry-mode loopback \
+        --passphrase-file "$WORK/passphrase" \
         --compress-algo bzip2 \
         --compress-level 9 \
-        --encrypt --recipient "$recipient" \
-        --output "$NEWDB" "$1" ||
-        die "GPG encryption failed."
+        --symmetric --cipher-algo AES256 \
+        --output "$NEWDB" "$1"; then
+        rm -f "$NEWDB"
+        NEWDB=
+        return 1
+    fi
 
-    chmod 600 "$NEWDB" || die "Cannot set encrypted database permissions."
-    mv -f "$NEWDB" "$DB" || die "Unable to replace database."
+    if ! chmod 600 "$NEWDB" || ! mv -f "$NEWDB" "$DB"; then
+        rm -f "$NEWDB"
+        NEWDB=
+        return 1
+    fi
     NEWDB=
+    if [ "$1" != "$WORK/database" ]; then
+        cp "$1" "$WORK/database" || die "Cannot update decrypted cache."
+    fi
+    chmod 600 "$WORK/database" || die "Cannot secure decrypted cache."
     DB_WAS_OLD=no
-    cache_clear
+    new_signature=$(cache_signature) || die "Cannot calculate database checksum."
+    cache_write "$new_signature"
+}
+
+ask_new_database_password() {
+    prompt_master_password new
 }
 
 init_db() {
-    [ "$#" -eq 1 ] || usage
+    [ "$#" -eq 0 ] || usage
     [ ! -e "$DB" ] || die "$DB already exists."
-    check_key_pair "$1"
     make_work
-    recipient=$1
-    printf 'PASSDB\t%s\n' "$recipient" > "$WORK/database" ||
+    cache_init
+    ask_new_database_password
+    printf 'PASSDB\tSYMMETRIC\n' > "$WORK/database" ||
         die "Cannot create database header."
-    encrypt_db "$WORK/database"
-    printf 'Initialized encrypted database: %s\n' "$DB"
+    chmod 600 "$WORK/database" || die "Cannot secure database."
+    encrypt_db "$WORK/database" || die "GPG symmetric encryption failed."
+    printf 'Initialized symmetric encrypted database: %s\n' "$DB"
 }
 
 rekey_db() {
-    [ "$#" -eq 1 ] || usage
-    check_key_pair "$1"
+    [ "$#" -eq 0 ] || usage
     decrypt_db
-    if [ "$recipient" = "$1" ] && [ "$DB_WAS_OLD" = no ]; then
-        printf 'Database already uses that key.\n'
-        return 0
+    # GPG-agent pinentry requests and confirms the replacement password.
+    cp "$WORK/passphrase" "$WORK/old-passphrase" ||
+        die "Cannot preserve current database password."
+    ask_new_database_password
+    if ! encrypt_db "$WORK/database"; then
+        cp "$WORK/old-passphrase" "$WORK/passphrase" || :
+        agent_clear_passphrase
+        cache_touch
+        die "Unable to re-encrypt database; the old database password was restored."
     fi
-    new_recipient=$1
-    {
-        printf 'PASSDB\t%s\n' "$new_recipient"
-        sed '1d' "$WORK/database"
-    } > "$WORK/updated" || die "Cannot prepare database for re-encryption."
-    recipient=$new_recipient
-    encrypt_db "$WORK/updated"
-    printf 'Database re-encrypted to key: %s\n' "$recipient"
+    printf 'Database password changed.\n'
 }
 
 parse_spec() {
@@ -522,7 +684,7 @@ store_record() {
     enc_user=$(encode_value "$key_username")
     remove_record "$enc_title" "$enc_user"
     append_current_record "$WORK/updated"
-    encrypt_db "$WORK/updated"
+    encrypt_db "$WORK/updated" || die "GPG symmetric encryption failed."
 }
 
 read_secret() {
@@ -668,6 +830,8 @@ edit_entry() {
 
     chmod 600 "$WORK/entry" || die "Cannot secure editor file."
     "$EDITOR_CMD" "$WORK/entry" || die "Editor failed."
+    # Editing is an active use of the unlocked store; restart its idle timer.
+    cache_touch
 
     # Require only Title and Password.
     for field in Title Password; do
@@ -719,7 +883,23 @@ edit_entry() {
 }
 
 
+open_db() {
+    [ "$#" -eq 0 ] || usage
+    decrypt_db
+    printf 'Database unlocked.\n'
+}
+
+close_db() {
+    [ "$#" -eq 0 ] || usage
+    close_cache
+}
+
 show_entry() {
+    if [ "$#" -eq 0 ]; then
+        decrypt_db
+        print_identifiers | LC_ALL=C sort -f
+        return 0
+    fi
     [ "$#" -eq 1 ] || usage
     decrypt_db
     parse_spec "$1"
@@ -731,7 +911,6 @@ show_entry() {
     cat "$WORK/notes"
     printf '\n'
 }
-
 schedule_clipboard_clear() {
     clip_source=$1
     clip_backend=$2
@@ -741,12 +920,8 @@ schedule_clipboard_clear() {
         ''|*[!0-9]*) clip_timeout=15 ;;
     esac
     [ "$clip_timeout" -gt 0 ] || return 0
-    if [ -d /dev/shm ] && [ -w /dev/shm ]; then
-        clip_base=/dev/shm
-    else
-        clip_base=${TMPDIR:-/tmp}
-    fi
-    clip_expected=$(mktemp "$clip_base/pass-clipboard.XXXXXX") || return 0
+    [ -d /dev/shm ] && [ -w /dev/shm ] || return 0
+    clip_expected=$(mktemp /dev/shm/pass-clipboard.XXXXXX) || return 0
     clip_current=$clip_expected.current
     if ! cp "$clip_source" "$clip_expected" || ! chmod 600 "$clip_expected"; then
         rm -f "$clip_expected"; return 0
@@ -829,12 +1004,13 @@ copy_entry() {
         notes) copy_file=$WORK/notes ;;
     esac
     copy_clipboard_file "$copy_file"
+    # Copying is active use; extend the five-minute cache timeout.
+    cache_touch
     printf '%s copied to clipboard.\n' "$copy_field"
 }
 
 print_identifiers() {
-    output_mode=$1
-    LC_ALL=C awk -v mode="$output_mode" '
+    LC_ALL=C awk '
     NR==1 {next}
     {
         field=1; escaped=0; first=""; second=""
@@ -854,17 +1030,10 @@ print_identifiers() {
             else if (field==1) first=first c
             else second=second c
         }
-        if (mode=="list") printf "%-30s %s\n",first,second
-        else printf "%s/%s\n",first,second
+        if (first !~ /[\r\n\t]/ && second !~ /[\r\n\t]/)
+            printf "%s/%s\n",first,second
     }' "$WORK/database"
 }
-
-list_entries() {
-    decrypt_db
-    printf '%-30s %s\n%-30s %s\n' TITLE USERNAME '-----' '--------'
-    print_identifiers list
-}
-
 delete_entry() {
     [ "$#" -eq 1 ] || usage
     decrypt_db
@@ -878,7 +1047,7 @@ delete_entry() {
         *) printf 'Cancelled.\n'; return 0 ;;
     esac
     remove_record "$(encode_value "$title")" "$(encode_value "$username")"
-    encrypt_db "$WORK/updated"
+    encrypt_db "$WORK/updated" || die "GPG symmetric encryption failed."
     printf 'Entry deleted.\n'
 }
 
@@ -945,13 +1114,13 @@ command_name=${1:-}
 [ "$#" -gt 0 ] && shift
 case "$command_name" in
     init) init_db "$@" ;;
+    open) open_db "$@" ;;
+    close|lock) close_db "$@" ;;
     rekey) rekey_db "$@" ;;
-    lock) [ "$#" -eq 0 ] || usage; lock_cache ;;
     add) [ "$#" -eq 0 ] || usage; add_entry ;;
     edit) edit_entry "$@" ;;
     show) show_entry "$@" ;;
     copy) copy_entry "$@" ;;
-    list) [ "$#" -eq 0 ] || usage; list_entries ;;
     delete) delete_entry "$@" ;;
     qr) qr_entry "$@" ;;
     generate|gen) generate_password "$@" ;;

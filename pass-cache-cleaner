@@ -1,0 +1,42 @@
+#!/bin/sh
+# One-shot idle timer for the pass cache. The parent pass process replaces
+# this timer on every cache touch by killing its PID and starting a new one.
+
+umask 077
+[ "$#" -eq 2 ] || exit 1
+cache_dir=$1
+timeout=$2
+
+case "$cache_dir" in
+    /dev/shm/pass-cache-[0-9]*) ;;
+    *) exit 1 ;;
+esac
+case "$timeout" in
+    ''|*[!0-9]*) exit 1 ;;
+esac
+[ "$timeout" -gt 0 ] 2>/dev/null || exit 1
+
+pid_file=$cache_dir/cleaner.pid
+[ -d "$cache_dir" ] || exit 0
+
+# Keep the timer PID as the controlling process; terminate its sleep child
+# too when pass replaces this timer.
+sleep "$timeout" &
+sleep_pid=$!
+trap 'kill "$sleep_pid" 2>/dev/null || :; exit 0' HUP INT TERM
+wait "$sleep_pid" || exit 0
+trap - HUP INT TERM
+
+# A newer timer may have replaced this process while it was sleeping.
+IFS= read -r current_pid < "$pid_file" 2>/dev/null || exit 0
+[ "$current_pid" = "$$" ] || exit 0
+
+rm -f "$cache_dir/database" "$cache_dir/state" "$pid_file" \
+    "$cache_dir"/database.* "$cache_dir"/state.* \
+    "$cache_dir/meta" "$cache_dir/passphrase" "$cache_dir/last-used"
+if command -v gpg-connect-agent >/dev/null 2>&1; then
+    printf 'CLEAR_PASSPHRASE pass:master\n/bye\n' |
+        gpg-connect-agent --quiet >/dev/null 2>&1 || :
+fi
+rmdir "$cache_dir" 2>/dev/null || :
+exit 0

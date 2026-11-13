@@ -1,215 +1,105 @@
-# Bash completion for the single-file GPG-backed password store.
-# All completion logic lives here; pass requires no Bash-specific code.
+# Bash completion for the custom symmetric-GPG `pass` script.
+# Install/source this file from your Bash completion configuration.
 
-_pass_completion_parse_line() {
-    local line=${COMP_LINE:0:${COMP_POINT:-${#COMP_LINE}}}
-    local token= quote= ch escaped=0 active=0 i
-    local -a parsed=()
+_pass_cache_candidates() {
+    local prefix=$1 pass_bin uid cache_dir cache_db candidate
 
-    for ((i=0; i<${#line}; i++)); do
-        ch=${line:i:1}
-        if (( escaped )); then
-            token+=$ch
-            escaped=0
-            active=1
-            continue
-        fi
-        case $quote in
-            "'")
-                if [[ $ch == "'" ]]; then quote=; else token+=$ch; fi
-                ;;
-            '"')
-                case $ch in
-                    '"') quote= ;;
-                    \\) escaped=1 ;;
-                    *) token+=$ch ;;
-                esac
-                ;;
-            *)
-                case $ch in
-                    \\) escaped=1; active=1 ;;
-                    "'"|'"') quote=$ch; active=1 ;;
-                    [[:space:]])
-                        if (( active )); then parsed+=("$token"); fi
-                        token=
-                        active=0
-                        ;;
-                    *) token+=$ch; active=1 ;;
-                esac
-                ;;
-        esac
-    done
-    _PASS_COMPLETION_WORDS=("${parsed[@]}" "$token")
-}
-
-_pass_completion_ci_prefix() {
-    [[ ${1,,} == "${2,,}"* ]]
-}
-
-# Reconstructing COMP_LINE gives us escaped spaces and the full email address.
-# Bash may otherwise split words at punctuation such as @.
-_pass_completion_replace_offset() {
-    local word=$1 breaks=${COMP_WORDBREAKS-} ch i offset=0
-    for ((i=0; i<${#word}; i++)); do
-        ch=${word:i:1}
-        [[ $ch == [[:space:]] ]] && continue
-        [[ $breaks == *"$ch"* ]] && offset=$i
-    done
-    printf '%s\n' "$offset"
-}
-
-# Decrypt directly here instead of calling a hidden command in pass.
-# Plaintext flows through a pipe and is not written to a temporary file.
-_pass_completion_candidates() {
-    local mode=$1 wanted_title=${2-}
-    local db=${PASS_COMPLETION_DB:-${PASS_DB:-$HOME/passwords.gpg}}
-    local gpg_bin
-
-    [[ -r $db ]] || return 0
-    gpg_bin=${PASS_GPG_BIN:-}
-    if [[ -z $gpg_bin ]]; then
-        gpg_bin=$(command -v gpg 2>/dev/null || command -v gpg2 2>/dev/null) || return 0
-    fi
-
-    GPG_TTY=$(tty 2>/dev/null) && export GPG_TTY
-
-    "$gpg_bin" --quiet --decrypt "$db" 2>/dev/null | LC_ALL=C awk \
-        -v mode="$mode" -v wanted="$wanted_title" '
-        function add(c) {
-            if (field == 1) title = title c
-            else if (field == 2) username = username c
-        }
-        NR == 1 {
-            if (index($0, "PASSDB\t") != 1 && index($0, "PASSDB ") != 1) exit
-            next
-        }
-        {
-            title = username = ""
-            field = 1
-            escaped = 0
-            for (i = 1; i <= length($0); i++) {
-                c = substr($0, i, 1)
-                if (escaped) {
-                    if (c == "n") value = "\n"
-                    else if (c == "r") value = "\r"
-                    else if (c == "t") value = "\t"
-                    else if (c == "\\" || c == "|") value = c
-                    else value = "\\" c
-                    add(value)
-                    escaped = 0
-                } else if (c == "\\") escaped = 1
-                else if (c == "|") field++
-                else add(c)
-                if (field > 2) break
-            }
-            # Newlines/tabs cannot be represented as a single completion.
-            if (title == "" || title ~ /[\r\n\t]/ || username ~ /[\r\n\t]/) next
-            if (mode == "titles") {
-                key = tolower(title)
-                if (!(key in seen_title)) {
-                    seen_title[key] = 1
-                    print title
-                }
-            } else if (mode == "users" && tolower(title) == tolower(wanted) && username != "") {
-                key = tolower(username)
-                if (!(key in seen_user)) {
-                    seen_user[key] = 1
-                    print username
-                }
-            }
-        }'
-}
-
-_pass_completion_complete_entry() {
-    local entry title prefix candidate full offset
-    local replace_offset
-
-    COMPREPLY=()
-    _pass_completion_parse_line
-    entry=${_PASS_COMPLETION_WORDS[${#_PASS_COMPLETION_WORDS[@]}-1]-}
-    replace_offset=$(_pass_completion_replace_offset "$entry")
-
-    if [[ $entry == */* ]]; then
-        title=${entry%%/*}
-        prefix=${entry#*/}
-        compopt -o filenames +o nospace 2>/dev/null || :
-        while IFS= read -r candidate; do
-            candidate=${candidate%$'\r'}
-            [[ -n $candidate ]] || continue
-            _pass_completion_ci_prefix "$candidate" "$prefix" || continue
-            full=$title/$candidate
-            COMPREPLY+=("${full:replace_offset}")
-        done < <(_pass_completion_candidates users "$title")
+    if [[ -n ${PASS_COMPLETION_BIN:-} ]]; then
+        pass_bin=$PASS_COMPLETION_BIN
+    elif [[ -n ${PASS_BIN:-} ]]; then
+        pass_bin=$PASS_BIN
+    elif [[ -x $HOME/scripts/pass ]]; then
+        pass_bin=$HOME/scripts/pass
     else
-        prefix=$entry
-        compopt -o filenames -o nospace 2>/dev/null || :
-        while IFS= read -r candidate; do
-            candidate=${candidate%$'\r'}
-            [[ -n $candidate ]] || continue
-            _pass_completion_ci_prefix "$candidate" "$prefix" || continue
-            full=$candidate/
-            COMPREPLY+=("${full:replace_offset}")
-        done < <(_pass_completion_candidates titles)
+        pass_bin=$(type -P pass 2>/dev/null)
     fi
+    [[ -n $pass_bin && -x $pass_bin ]] || return 1
+
+    # `open` validates the encrypted database signature and idle lease;
+    # it invokes Pinentry only when the cache needs to be rebuilt.
+    "$pass_bin" open >/dev/null 2>&1 || return 1
+
+    uid=$(id -u) || return 1
+    cache_dir=/dev/shm/pass-cache-$uid
+    cache_db=$cache_dir/database
+    [[ -r $cache_db ]] || return 1
+
+    while IFS= read -r candidate; do
+        [[ $candidate == "$prefix"* ]] && COMPREPLY+=("$candidate")
+    done < <(
+        LC_ALL=C awk '
+            NR == 1 { next }
+            {
+                title = username = ""
+                field = 1
+                escaped = 0
+                for (i = 1; i <= length($0); i++) {
+                    c = substr($0, i, 1)
+                    if (escaped) {
+                        if (c == "n") value = "\n"
+                        else if (c == "r") value = "\r"
+                        else if (c == "t") value = "\t"
+                        else if (c == "\\" || c == "|") value = c
+                        else value = "\\" c
+                        if (field == 1) title = title value
+                        else if (field == 2) username = username value
+                        escaped = 0
+                    } else if (c == "\\") escaped = 1
+                    else if (c == "|") field++
+                    else if (field == 1) title = title c
+                    else if (field == 2) username = username c
+                    if (field > 2) break
+                }
+                if (title == "" || title ~ /[\r\n\t]/ || username ~ /[\r\n\t]/)
+                    next
+                key = tolower(title) SUBSEP tolower(username)
+                if (!(key in seen)) {
+                    seen[key] = 1
+                    print title "/" username
+                }
+            }
+        ' "$cache_db" | LC_ALL=C sort -f
+    )
 }
 
-_pass_completion_main() {
-    local command_name current
-    COMPREPLY=()
-    _pass_completion_parse_line
-    command_name=${_PASS_COMPLETION_WORDS[1]-}
-    current=${_PASS_COMPLETION_WORDS[${#_PASS_COMPLETION_WORDS[@]}-1]-}
+_pass_completion() {
+    local cur=${COMP_WORDS[COMP_CWORD]}
+    local command=${COMP_WORDS[1]-}
+    local previous=${COMP_WORDS[COMP_CWORD-1]-}
+    local cword=$COMP_CWORD
+    local -a commands copy_options otp_actions
 
-    if (( ${#_PASS_COMPLETION_WORDS[@]} == 2 )); then
-        COMPREPLY=( $(compgen -W 'init rekey lock add edit show copy list delete otp qr generate gen' -- "$current") )
+    COMPREPLY=()
+    commands=(init open close rekey add edit show copy delete qr generate otp)
+    copy_options=(--username --password --notes --url)
+    otp_actions=(add remove)
+
+    if (( cword == 1 )); then
+        COMPREPLY=( $(compgen -W "${commands[*]}" -- "$cur") )
         return 0
     fi
 
-    case $command_name in
-        edit|show|delete|qr)
-            (( ${#_PASS_COMPLETION_WORDS[@]} == 3 )) && _pass_completion_complete_entry
+    case "$command" in
+        show|edit|delete|qr)
+            (( cword == 2 )) || return 0
+            _pass_cache_candidates "$cur"
             ;;
         copy)
-            if (( ${#_PASS_COMPLETION_WORDS[@]} == 3 )); then
-                if [[ $current == -* ]]; then
-                    COMPREPLY=( $(compgen -W '--username --password --notes --url -u -p -n -l' -- "$current") )
-                else
-                    _pass_completion_complete_entry
-                fi
-            elif (( ${#_PASS_COMPLETION_WORDS[@]} == 4 )); then
-                case ${_PASS_COMPLETION_WORDS[2]} in
-                    -u|-p|-n|-l|--username|--password|--notes|--url)
-                        _pass_completion_complete_entry
-                        ;;
-                esac
+            if (( cword == 2 )) && [[ $cur == -* ]]; then
+                COMPREPLY=( $(compgen -W "${copy_options[*]}" -- "$cur") )
+            elif (( cword == 2 )) || { (( cword == 3 )) && [[ $previous == -* ]]; }; then
+                _pass_cache_candidates "$cur"
             fi
             ;;
         otp)
-            if (( ${#_PASS_COMPLETION_WORDS[@]} == 3 )); then
-                if [[ $current == add* || $current == remove* ]]; then
-                    COMPREPLY=( $(compgen -W 'add remove' -- "$current") )
-                else
-                    _pass_completion_complete_entry
-                fi
-            elif (( ${#_PASS_COMPLETION_WORDS[@]} == 4 )); then
-                case ${_PASS_COMPLETION_WORDS[2]} in
-                    add|remove) _pass_completion_complete_entry ;;
-                esac
+            if (( cword == 2 )); then
+                COMPREPLY=( $(compgen -W "${otp_actions[*]}" -- "$cur") )
+                _pass_cache_candidates "$cur"
+            elif (( cword == 3 )) && [[ $previous == add || $previous == remove ]]; then
+                _pass_cache_candidates "$cur"
             fi
             ;;
     esac
-    return 0
 }
 
-_pass_import_completion() {
-    local current=${COMP_WORDS[COMP_CWORD]-} candidate
-    COMPREPLY=()
-    (( COMP_CWORD == 1 )) || return 0
-    compopt -o filenames 2>/dev/null || :
-    while IFS= read -r candidate; do
-        COMPREPLY+=("$candidate")
-    done < <(compgen -d -- "$current")
-}
-
-complete -F _pass_completion_main pass
-complete -F _pass_import_completion pass-import
+complete -o filenames -F _pass_completion pass
