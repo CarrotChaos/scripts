@@ -6,7 +6,7 @@
 set -u
 set -o pipefail
 
-PASS_BIN=${PASS_BIN:-"$HOME/scripts/pass"}
+PASS_BIN=${PASS_BIN:-"$HOME/scripts/password-manager/pass"}
 PASS_DB=${PASS_DB:-"$HOME/passwords.gpg"}
 PASS_TIMEOUT=${PASS_TIMEOUT:-15}
 CACHE_SECONDS=${CACHE_SECONDS:-45}
@@ -106,13 +106,15 @@ _has_nonempty_field() {
 
 show_options() {
     local entry=$1 choice result=0
-    local -a options=("Copy password")
+    local -a options=()
 
     # This call validates the entry and refreshes pass's shared cache.
     run_pass show "$entry" > "$TMP/show" || return 2
 
+    # Keep username ahead of password in the dmenu list.
     # A username, TOTP secret, or URL may legitimately be absent.
     _has_nonempty_field Username && options+=("Copy username")
+    options+=("Copy password")
     _has_nonempty_field Totp && options+=("Copy TOTP")
     _has_nonempty_field URL && options+=("Copy URL")
 
@@ -193,3 +195,4 @@ main() {
 }
 
 main "$@"
+
